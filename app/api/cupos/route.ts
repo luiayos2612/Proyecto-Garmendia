@@ -109,30 +109,15 @@ export async function PATCH(request: NextRequest) {
       const config: any = {};
       configRes.rows.forEach((r: any) => config[r.clave] = r.valor);
 
-      // 5. Generar deuda de inscripción del nuevo periodo (verificacion - aparece en panel para aceptar/rechazar)
+      // 5. Generar SOLO deuda de inscripción del nuevo periodo (verificacion - aparece en panel)
       await client.query(
         `INSERT INTO pagos (estudiante_id, tipo, concepto, monto, metodo_pago, estado, fecha_pago)
          VALUES ($1, 'inscripcion', 'Inscripción Periodo ' || $2, $3, 'Pendiente', 'verificacion', CURRENT_DATE)`,
         [cupo.estudiante_id, cupo.periodo_destino, parseFloat(config.costo_inscripcion || '25')]
       );
 
-      // 6. Generar 6 cuotas de mensualidad para el nuevo periodo en tabla pagos (verificacion - aparecen en panel)
-      const montoMensual = parseFloat(config.monto_mensualidad || '25');
-      const hoy = new Date();
-      for (let i = 0; i < 6; i++) {
-        const fechaVenc = new Date(hoy.getFullYear(), hoy.getMonth() + i + 1, 5);
-        await client.query(
-          `INSERT INTO pagos (estudiante_id, tipo, concepto, monto, metodo_pago, estado, fecha_pago)
-           VALUES ($1, 'mensualidad', 'Mensualidad Periodo ' || $2 || ' - Mes ' || $3, $4, 'Pendiente', 'verificacion', $5)`,
-          [
-            cupo.estudiante_id,
-            cupo.periodo_destino,
-            i + 1,
-            montoMensual,
-            fechaVenc.toISOString().split('T')[0]
-          ]
-        );
-      }
+      // 6. Las mensualidades se generarán automáticamente cada mes via cron job
+      // (ver app/api/pagos/generar-mensualidades/route.ts)
 
     } else {
       await client.query(
