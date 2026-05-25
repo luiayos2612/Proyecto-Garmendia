@@ -109,14 +109,24 @@ export async function PATCH(request: NextRequest) {
       const config: any = {};
       configRes.rows.forEach((r: any) => config[r.clave] = r.valor);
 
-      // 5. Generar SOLO deuda de inscripción del nuevo periodo (verificacion - aparece en panel)
-      await client.query(
-        `INSERT INTO pagos (estudiante_id, tipo, concepto, monto, metodo_pago, estado, fecha_pago)
-         VALUES ($1, 'inscripcion', 'Inscripción Periodo ' || $2, $3, 'Pendiente', 'verificacion', CURRENT_DATE)`,
-        [cupo.estudiante_id, cupo.periodo_destino, parseFloat(config.costo_inscripcion || '25')]
+      // 5. Generar SOLO deuda de inscripción del nuevo periodo (SEMESTRAL: una sola por período)
+      // Validar que no exista ya una inscripción para este período
+      const inscripcionExiste = await client.query(
+        `SELECT id FROM pagos
+         WHERE estudiante_id = $1 AND tipo = 'inscripcion' AND periodo_id = $2`,
+        [cupo.estudiante_id, cupo.periodo_destino]
       );
 
+      if (inscripcionExiste.rows.length === 0) {
+        await client.query(
+          `INSERT INTO pagos (estudiante_id, tipo, concepto, monto, metodo_pago, estado, fecha_pago, periodo_id)
+           VALUES ($1, 'inscripcion', 'Inscripción Periodo ' || $2, $3, 'Pendiente', 'verificacion', CURRENT_DATE, $4)`,
+          [cupo.estudiante_id, cupo.periodo_destino, parseFloat(config.costo_inscripcion || '25'), cupo.periodo_destino]
+        );
+      }
+
       // 6. Las mensualidades se generarán automáticamente cada mes via cron job
+      // (máximo 6 mensualidades por semestre)
       // (ver app/api/pagos/generar-mensualidades/route.ts)
 
     } else {
