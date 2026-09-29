@@ -1,27 +1,124 @@
+/* globals.css o app/globals.css */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  /* Paleta principal basada en tus capturas */
+  --color-primary: #1e3a8a;        /* Navy blue del sidebar */
+  --color-primary-dark: #172554;   /* Navy más oscuro para hover */
+  --color-accent: #3b82f6;         /* Azul brillante para acentos */
+  --color-surface: #f8fafc;        /* Gris muy claro fondo */
+  --color-surface-elevated: #ffffff; /* Cards blancas */
+  --color-border: #e2e8f0;         /* Bordes sutiles */
+  --color-text-primary: #0f172a;   /* Texto principal casi negro */
+  --color-text-secondary: #64748b; /* Texto secundario gris */
+  --color-text-muted: #94a3b8;     /* Texto terciario */
+  
+  /* Estados */
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  
+  /* Sombras */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-card: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+  
+  /* Bordes redondeados */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
   }
 }
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
+@layer components {
+  /* Card estándar del sistema */
+  .bento-card {
+    @apply bg-white rounded-2xl p-6 border border-slate-200 shadow-sm;
+    @apply transition-all duration-200 hover:shadow-md hover:-translate-y-0.5;
+  }
+  
+  /* Card con fondo de color (para alertas/comunicados) */
+  .bento-card-colored {
+    @apply rounded-2xl p-6 text-white shadow-lg;
+  }
+  
+  /* Botón primario */
+  .btn-primary {
+    @apply px-6 py-3 bg-blue-900 text-white rounded-xl font-semibold text-sm;
+    @apply hover:bg-blue-950 transition-colors shadow-lg shadow-blue-900/20;
+    @apply active:scale-95 transition-transform;
+  }
+  
+  /* Botón secundario/outline */
+  .btn-secondary {
+    @apply px-6 py-3 bg-white text-slate-700 border border-slate-200 rounded-xl font-semibold text-sm;
+    @apply hover:bg-slate-50 hover:border-slate-300 transition-all;
+  }
+  
+  /* Input estilizado */
+  .input-modern {
+    @apply w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm;
+    @apply focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500;
+    @apply placeholder:text-slate-400 transition-all;
+  }
+  
+  /* Tabla académica estilo captura */
+  .table-academic {
+    @apply w-full border-collapse;
+  }
+  
+  .table-academic th {
+    @apply text-left py-4 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider border-b border-slate-200 bg-slate-50/50;
+  }
+  
+  .table-academic td {
+    @apply py-4 px-4 text-sm text-slate-700 border-b border-slate-100;
+  }
+  
+  .table-academic tr:hover {
+    @apply bg-blue-50/30 transition-colors;
+  }
+  
+  /* Badge/Tag */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold;
+  }
+  
+  .badge-success {
+    @apply bg-emerald-100 text-emerald-700;
+  }
+  
+  .badge-warning {
+    @apply bg-amber-100 text-amber-700;
+  }
+  
+  .badge-info {
+    @apply bg-blue-100 text-blue-700;
+  }
+  
+  /* Barra de progreso */
+  .progress-bar {
+    @apply h-2.5 bg-slate-200 rounded-full overflow-hidden;
+  }
+  
+  .progress-fill {
+    @apply h-full bg-blue-600 rounded-full transition-all duration-500;
   }
 }

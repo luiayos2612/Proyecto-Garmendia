@@ -1,0 +1,9 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^git add app/api/cupos/route\\.ts app/api/pagos/route\\.ts app/api/pagos/\\[id\\]/route\\.ts app/api/pagos/estudiante/\\[id\\]/route\\.ts && git commit -m \"Fix: Reiniciar contador de pagos y deuda cuando estudiante pasa a nuevo periodo\n\n- Agregar fecha_inicio_periodo_actual a calculo de deuda en lugar de fecha_ingreso\n- Reiniciar fecha_inicio_periodo_actual cuando cupo es aprobado\n- Crear pagos pendientes \\(inscripcion \\+ 6 mensualidades\\) en tabla pagos en lugar de cuotas\n- Actualizar funciones de recalculo de estado para usar fecha_inicio_periodo_actual\n- Esto permite que cada periodo tenga su propio ciclo de cobros sin confusiones\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "psql": true
+    }
+}

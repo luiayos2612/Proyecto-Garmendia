@@ -87,6 +87,28 @@ export async function PATCH(request: NextRequest) {
         [cupo.periodo_destino, cupo.estudiante_id]
       );
 
+      // ✅ NUEVO: Validar materias complementarias antes de avanzar a Periodo 6
+      if (cupo.periodo_destino === 6) {
+        const complementariasVistas = await client.query(
+          `SELECT DISTINCT m.nombre
+          FROM materias m
+          WHERE m.nombre IN ('IDIOMAS','OFICIO')
+            AND m.id IN (
+              SELECT materia_id FROM historial_academico WHERE estudiante_id = $1
+              UNION
+              SELECT materia_id FROM inscripciones_materias WHERE estudiante_id = $1 AND activa = true
+            )`,
+          [cupo.estudiante_id]
+        );
+
+        if (complementariasVistas.rows.length === 0 && !body.materia_complementaria_id) {
+          await client.query('ROLLBACK');
+          return NextResponse.json({
+            error: 'El estudiante no ha cursado ninguna materia complementaria (IDIOMAS u OFICIO). Debe seleccionar una manualmente (materia_complementaria_id) antes de avanzar a Periodo 6.'
+          }, { status: 400 });
+        }
+      }
+
       // 3. Inscribir en materias obligatorias del nuevo periodo
       const obligatorias = await client.query(
         `SELECT materia_id FROM periodo_materia 
@@ -99,6 +121,14 @@ export async function PATCH(request: NextRequest) {
           `INSERT INTO inscripciones_materias (estudiante_id, materia_id, periodo_id, ano_escolar)
            VALUES ($1,$2,$3,'2025-2026') ON CONFLICT DO NOTHING`,
           [cupo.estudiante_id, row.materia_id, cupo.periodo_destino]
+        );
+      }
+
+      if (cupo.periodo_destino === 6 && body.materia_complementaria_id) {
+        await client.query(
+          `INSERT INTO inscripciones_materias (estudiante_id, materia_id, periodo_id, ano_escolar)
+          VALUES ($1,$2,$3,'2025-2026') ON CONFLICT DO NOTHING`,
+          [cupo.estudiante_id, body.materia_complementaria_id, cupo.periodo_destino]
         );
       }
 

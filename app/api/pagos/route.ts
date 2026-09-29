@@ -76,19 +76,26 @@ export async function GET(request: NextRequest) {
     `;
 
     const params: any[] = [];
-    let i = 1;
+    let idx = 1;
 
-    if (estado) { query += ` AND e.estado = $${i++}`; params.push(estado); }
-    if (busqueda) {
-      query += ` AND (e.nombres ILIKE $${i} OR e.apellidos ILIKE $${i} OR e.cedula ILIKE $${i})`;
-      params.push(`%${busqueda}%`); i++;
+    if (estado) {
+      query += ` AND e.estado = $${idx}`;
+      params.push(estado);
+      idx++;
     }
 
-    query += ` ORDER BY e.created_at DESC`;
+    if (busqueda) {
+      query += ` AND (e.nombres ILIKE $${idx} OR e.apellidos ILIKE $${idx} OR e.cedula ILIKE $${idx})`;
+      params.push(`%${busqueda}%`);
+      idx++;
+    }
+
+    query += ` ORDER BY e.created_at DESC LIMIT 100`;
 
     const result = await pool.query(query, params);
     return NextResponse.json({ estudiantes: result.rows });
   } catch (error) {
+    console.error('[GET /api/pagos]', error);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }
@@ -112,12 +119,10 @@ export async function POST(request: NextRequest) {
       [estudiante_id, tipo || 'mensualidad', concepto, monto, metodo_pago, referencia || null, fecha_pago || new Date()]
     );
 
-    // Recalcular estado (aunque el pago esté en verificación, si ya tenía deuda, sigue en deuda)
     await recalcularEstadoEstudiante(client, estudiante_id);
 
     await client.query('COMMIT');
 
-    // Auditoría
     await pool.query(
       `INSERT INTO auditoria (tabla_afectada, accion, usuario_id, datos_nuevos)
        VALUES ('pagos','INSERT','sistema',$1)`,
@@ -127,6 +132,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, pago: result.rows[0] });
   } catch (error) {
     await client.query('ROLLBACK');
+    console.error('[POST /api/pagos]', error);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   } finally {
     client.release();

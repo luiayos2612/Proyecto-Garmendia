@@ -3,18 +3,7 @@ import { Pool } from 'pg';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-/**
- * Genera automáticamente la mensualidad del mes actual para todos los estudiantes
- * que tienen inscripción confirmada en el período actual.
- *
- * FUNCIONAMIENTO SEMESTRAL:
- * - Inscripción: Se cobra UNA SOLA VEZ al aprobar cupo (monto de configuracion)
- * - Mensualidades: Se cobran SOLO 6 (una por mes del semestre)
- * - No genera mensualidades después de los 6 meses (fin del semestre)
- *
- * Se debe llamar una vez al mes (idealmente el 1er día del mes)
- * via cron job externo o manualmente desde admin panel
- */
+
 export async function POST(request: NextRequest) {
   const client = await pool.connect();
   try {
@@ -35,30 +24,29 @@ export async function POST(request: NextRequest) {
     // QUE TENGAN MENOS DE 6 MENSUALIDADES (aún están en el semestre)
     const estudiantesRes = await client.query(
       `SELECT e.id, e.periodo_id, p.numero, COUNT(pm.id) as mensualidades_pagadas
-       FROM estudiantes e
-       JOIN periodos p ON p.numero = e.periodo_id
-       LEFT JOIN pagos pm ON pm.estudiante_id = e.id
-         AND pm.tipo = 'mensualidad'
-         AND pm.periodo_id = e.periodo_id
-       WHERE e.estado IN ('activo', 'verificacion', 'deuda')
-       AND e.fecha_inicio_periodo_actual IS NOT NULL
-       AND EXISTS (
-         SELECT 1 FROM pagos pi
-         WHERE pi.estudiante_id = e.id
-         AND pi.tipo = 'inscripcion'
-         AND pi.periodo_id = e.periodo_id
-         AND pi.estado = 'confirmado'
-       )
-       AND COUNT(pm.id) < 6
-       AND NOT EXISTS (
-         SELECT 1 FROM pagos
-         WHERE estudiante_id = e.id
-         AND tipo = 'mensualidad'
-         AND EXTRACT(MONTH FROM fecha_pago::date) = $1
-         AND EXTRACT(YEAR FROM fecha_pago::date) = $2
-       )
-       GROUP BY e.id, p.numero`
-      ,
+      FROM estudiantes e
+      JOIN periodos p ON p.numero = e.periodo_id
+      LEFT JOIN pagos pm ON pm.estudiante_id = e.id
+        AND pm.tipo = 'mensualidad'
+        AND pm.periodo_id = e.periodo_id
+      WHERE e.estado IN ('activo', 'verificacion', 'deuda')
+        AND e.fecha_inicio_periodo_actual IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM pagos pi
+          WHERE pi.estudiante_id = e.id
+            AND pi.tipo = 'inscripcion'
+            AND pi.periodo_id = e.periodo_id
+            AND pi.estado = 'confirmado'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM pagos
+          WHERE estudiante_id = e.id
+            AND tipo = 'mensualidad'
+            AND EXTRACT(MONTH FROM fecha_pago::date) = $1
+            AND EXTRACT(YEAR FROM fecha_pago::date) = $2
+        )
+      GROUP BY e.id, p.numero
+      HAVING COUNT(pm.id) < 6`,         
       [mesActual, anoActual]
     );
 
