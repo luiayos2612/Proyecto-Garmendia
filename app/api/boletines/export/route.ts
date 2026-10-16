@@ -148,18 +148,19 @@ export async function POST(request: NextRequest) {
       const notaData = notasMap.get(normalizado);
 
       if (notaData && notaData.nota !== null && notaData.nota !== undefined) {
-        const nota20 = parseFloat(notaData.nota);
+        const nota5 = parseFloat(notaData.nota);
 
-        // Validar que la nota sea un número válido entre 0 y 20
-        if (!isNaN(nota20) && nota20 >= 0 && nota20 <= 20) {
-          // Cargar nota en columna N°
-          worksheet.getCell(`${pMap.colNota}${fila}`).value = nota20;
+        // Validar que la nota sea válida en la escala de 1.00 a 5.00
+        if (!Number.isNaN(nota5) && nota5 >= 1 && nota5 <= 5) {
+          // Cargar la nota en la celda del boletín
+          worksheet.getCell(`${pMap.colNota}${fila}`).value = nota5;
 
           // Extraer mes y año de la fecha de carga
           if (notaData.fecha_carga) {
             const fecha = new Date(notaData.fecha_carga);
             const mes = (fecha.getMonth() + 1).toString().padStart(2, '0');
             const año = fecha.getFullYear().toString();
+
             worksheet.getCell(`${pMap.colMes}${fila}`).value = mes;
             worksheet.getCell(`${pMap.colAño}${fila}`).value = año;
           }

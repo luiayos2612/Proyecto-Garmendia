@@ -1,5 +1,14 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+# Archivos que NO subir
+.env
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+.env.local
+
 # dependencies
 /node_modules
 /.pnp

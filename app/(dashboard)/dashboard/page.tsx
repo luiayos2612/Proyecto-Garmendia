@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import CalendarioDashboard from '../../components/CalendarioDashboard';
 import {
   Users,
   GraduationCap,
@@ -18,6 +19,7 @@ interface DashboardData {
   totalEstudiantes?: number;
   totalDocentes?: number;
   promedioGeneral?: string;
+  
 }
 
 export default function DashboardPage() {
@@ -49,7 +51,7 @@ export default function DashboardPage() {
   const stats = [
     {
       title: 'Total Estudiantes',
-      value: data?.totalEstudiantes || 0,
+      value: data?.totalEstudiantes ?? 0,
       icon: Users,
       color: 'bg-blue-500',
       lightColor: 'bg-blue-50',
@@ -58,7 +60,7 @@ export default function DashboardPage() {
     },
     {
       title: 'Docentes Activos',
-      value: data?.totalDocentes || 0,
+      value: data?.totalDocentes ?? 0,
       icon: GraduationCap,
       color: 'bg-violet-500',
       lightColor: 'bg-violet-50',
@@ -67,22 +69,14 @@ export default function DashboardPage() {
     },
     {
       title: 'Promedio General',
-      value: data?.promedioGeneral || '17.2',
+      value: Number(data?.promedioGeneral ?? 0).toFixed(2),
       icon: CheckCircle2,
       color: 'bg-amber-500',
       lightColor: 'bg-amber-50',
       textColor: 'text-amber-600',
       href: '#'
     },
-    {
-      title: 'Reportes',
-      value: '3',
-      icon: TrendingUp,
-      color: 'bg-emerald-500',
-      lightColor: 'bg-emerald-50',
-      textColor: 'text-emerald-600',
-      href: '/reportes'
-    }
+    
   ];
 
   return (
@@ -136,35 +130,8 @@ export default function DashboardPage() {
       {/* Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main Info Card */}
-        <div className="lg:col-span-2 bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-8 text-white relative overflow-hidden">
-          <span className="inline-flex items-center px-3 py-1 rounded-full text-[10px] font-bold bg-white/10 text-white/80 mb-4">
-            Proximamente
-          </span>
-          <h2 className="text-xl font-bold mb-2 flex items-center gap-2">
-            <BookOpen size={20} /> Calendario de Actividades
-          </h2>
-          <p className="text-slate-300 text-sm mb-6 max-w-md">
-            Plataforma de gestión académica integral. Administra estudiantes, docentes,
-            materias, calificaciones y auditoría del sistema en un solo lugar.
-          </p>
-          <div className="flex gap-3">
-            <Link
-              href="/estudiantes"
-              className="px-4 py-2.5 bg-blue-600 text-white rounded-xl font-semibold text-sm hover:bg-blue-700 transition-all"
-            >
-              Ver Estudiantes
-            </Link>
-            {/* ✅ MODIFICADO: "Inscribir Estudiante" solo visible para director,
-                el docente no debe tener este acceso directo tampoco desde el dashboard. */}
-            {rol === 'director' && (
-              <Link
-                href="/estudiantes/nuevo"
-                className="px-4 py-2.5 bg-white/10 text-white rounded-xl font-semibold text-sm hover:bg-white/20 transition-all"
-              >
-                Inscribir Estudiante
-              </Link>
-            )}
-          </div>
+        <div className="lg:col-span-2">
+            <CalendarioDashboard esDirector={rol === 'director'} />
         </div>
 
         {/* Quick Stats */}

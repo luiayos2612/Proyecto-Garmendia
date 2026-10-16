@@ -5,14 +5,18 @@ import { verifyToken } from '@/lib/auth';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
+// En Next.js 15+, params es una Promise y debe esperarse con await
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   const token = request.cookies.get('token')?.value ?? '';
   const actor = verifyToken(token);
   if (!actor) {
     return NextResponse.json({ message: 'No autorizado' }, { status: 401 });
   }
 
-  const { id } = params;
+  const { id } = await params;
   if (!id) {
     return NextResponse.json({ message: 'ID de usuario requerido' }, { status: 400 });
   }
@@ -82,34 +86,51 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   }
 }
 
-export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   const token = request.cookies.get('token')?.value ?? '';
   const actor = verifyToken(token);
   if (!actor) {
     return NextResponse.json({ message: 'No autorizado' }, { status: 401 });
   }
 
-  const { id } = params;
+  const { id } = await params;
   if (!id) {
     return NextResponse.json({ message: 'ID de usuario requerido' }, { status: 400 });
   }
 
+  const client = await pool.connect();
+
   try {
-    const result = await pool.query('DELETE FROM usuarios WHERE id = $1 RETURNING id, email', [id]);
+    await client.query('BEGIN');
+
+    // Desvincular docente antes de eliminar el usuario para no dejar
+    // un usuario_id huérfano (evita errores de llave foránea)
+    await client.query('UPDATE docentes SET usuario_id = NULL WHERE usuario_id = $1', [id]);
+
+    const result = await client.query('DELETE FROM usuarios WHERE id = $1 RETURNING id, email', [id]);
 
     if (result.rowCount === 0) {
+      await client.query('ROLLBACK');
       return NextResponse.json({ message: 'Usuario no encontrado' }, { status: 404 });
     }
 
-    await pool.query(
+    await client.query(
       `INSERT INTO auditoria (tabla_afectada, accion, usuario_id, datos_nuevos)
        VALUES ($1, $2, $3, $4)`,
       ['usuarios', 'DELETE', actor.userId, JSON.stringify({ id, email: result.rows[0].email, timestamp: new Date(), tipo: 'eliminar_usuario' })]
     );
 
+    await client.query('COMMIT');
+
     return NextResponse.json({ message: 'Usuario eliminado' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error DELETE usuarios:', error);
     return NextResponse.json({ message: 'Error al eliminar usuario' }, { status: 500 });
+  } finally {
+    client.release();
   }
 }

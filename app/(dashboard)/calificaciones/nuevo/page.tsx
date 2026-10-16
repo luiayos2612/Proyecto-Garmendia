@@ -369,11 +369,11 @@ export default function NuevaCalificacionPage() {
                           <input
                             type="number"
                             step="0.01"
-                            min="0"
-                            max="20"
+                            min="1"
+                            max="5"
                             value={est.nota}
                             onChange={(e) => handleNotaChange(est.id, e.target.value)}
-                            placeholder="0-20"
+                            placeholder="1-5"
                             className={`w-full px-3 py-2 bg-slate-50 border rounded-lg text-sm focus:outline-none focus:ring-2 transition-all ${
                               notaEsInvalida(est.nota)
                                 ? 'border-red-300 focus:border-red-500 focus:ring-red-500/20 text-red-700'

@@ -178,9 +178,12 @@ export async function POST(request: NextRequest) {
         }
 
         const notaNum = parseFloat(nota);
-        if (isNaN(notaNum) || notaNum < 0 || notaNum > 20) {
-          errores.push({ estudiante_id, error: 'Nota inválida (0-20)' });
-          continue;
+        if (Number.isNaN(notaNum) || notaNum < 1 || notaNum > 5) {
+        errores.push({
+          estudiante_id,
+          error: 'Nota inválida. Debe estar entre 1.00 y 5.00.',
+        });
+        continue;
         }
 
         const inscrito = await estudianteInscrito(client, estudiante_id, materia_id, periodo_id);
@@ -233,7 +236,7 @@ export async function POST(request: NextRequest) {
               estudiante_nombre: estudianteNombre,
               materia_nombre: materiaNombre,
               docente_nombre: docenteNombre,
-              resumen: `Nota ${notaNum}/20 a ${estudianteNombre} en ${materiaNombre} (carga masiva)`,
+              resumen: `Nota ${notaNum.toFixed(2)}/5 a ${estudianteNombre} en ${materiaNombre} (carga masiva)`,
             }),
           ]
         );
@@ -276,8 +279,11 @@ export async function POST(request: NextRequest) {
     const asignacion = validacion.asignacion;
 
     const notaNum = parseFloat(nota);
-    if (isNaN(notaNum) || notaNum < 0 || notaNum > 20) {
-      return NextResponse.json({ error: 'Nota inválida (0-20)' }, { status: 400 });
+    if (Number.isNaN(notaNum) || notaNum < 1 || notaNum > 5) {
+      return NextResponse.json(
+        { error: 'Nota inválida. Debe estar entre 1.00 y 5.00.' },
+        { status: 400 }
+      );
     }
 
     const inscrito = await estudianteInscrito(client, estudiante_id, asignacion.materia_id, asignacion.periodo_id);
@@ -328,7 +334,7 @@ export async function POST(request: NextRequest) {
           estudiante_nombre: estudianteNombre,
           materia_nombre: materiaNombre,
           docente_nombre: docenteNombre,
-          resumen: `Nota ${notaNum}/20 a ${estudianteNombre} en ${materiaNombre}`,
+          resumen: `Nota ${notaNum.toFixed(2)}/5 a ${estudianteNombre} en ${materiaNombre}`,
         }),
       ]
     );

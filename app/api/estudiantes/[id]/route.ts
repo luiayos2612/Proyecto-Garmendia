@@ -96,16 +96,38 @@ export async function GET(
       );
       pagos = pagosRes.rows;
 
-      const resumenRes = await pool.query(
-        `SELECT
-          COALESCE(SUM(monto), 0) as total_pagado,
-          COUNT(*) FILTER (WHERE tipo = 'inscripcion' AND estado = 'confirmado') as inscripciones_pagadas,
-          COUNT(*) FILTER (WHERE tipo = 'mensualidad' AND estado = 'confirmado') as mensualidades_pagadas,
-          COUNT(*) FILTER (WHERE estado = 'verificacion') as pagos_pendientes
-        FROM pagos WHERE estudiante_id = $1`,
-        [id]
-      );
-      resumen = resumenRes.rows[0];
+    const resumenRes = await pool.query(
+    `
+      SELECT
+        COALESCE(
+          (
+            SELECT SUM(p.monto)
+            FROM pagos p
+            WHERE p.estudiante_id = $1
+              AND p.estado = 'confirmado'
+          ),
+          0
+        ) AS total_pagado,
+
+        COALESCE(
+          (
+            SELECT SUM(c.monto)
+            FROM cuotas c
+            WHERE c.estudiante_id = $1
+              AND c.estado IN ('pendiente', 'vencida')
+          ),
+          0
+        ) AS deuda_total,
+
+        COUNT(*) FILTER (
+          WHERE c.estado IN ('pendiente', 'vencida')
+        ) AS cuotas_pendientes
+      FROM cuotas c
+      WHERE c.estudiante_id = $1
+    `,
+    [id]
+  );
+  resumen = resumenRes.rows[0];
 
       const cupoRes = await pool.query(
         `SELECT * FROM cupos WHERE estudiante_id = $1 AND estado = 'pendiente'`,

@@ -72,14 +72,53 @@ export default function DetallePagoPage() {
   };
 
   const verificarPago = async (pagoId: string, estado: 'confirmado' | 'rechazado') => {
+    const mensaje =
+      estado === 'confirmado'
+        ? '¿Confirmar este pago?'
+        : '¿Rechazar este pago?';
+
+    if (!window.confirm(mensaje)) return;
+
     try {
+      setError('');
+
       const res = await fetch(`/api/pagos/${pagoId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ estado })
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ estado }),
       });
-      if (res.ok) cargarDatos();
-    } catch (err) { console.error(err); }
+
+      const texto = await res.text();
+
+      let respuesta: { error?: string } = {};
+
+      try {
+        respuesta = texto ? JSON.parse(texto) : {};
+      } catch {
+        throw new Error(
+          `El servidor devolvió una respuesta no válida. HTTP ${res.status}.`
+        );
+      }
+
+      if (!res.ok) {
+        throw new Error(
+          respuesta.error ||
+            `No se pudo actualizar el pago. HTTP ${res.status}.`
+        );
+      }
+
+      await cargarDatos();
+    } catch (err: unknown) {
+      const mensajeError =
+        err instanceof Error
+          ? err.message
+          : 'No se pudo actualizar el pago.';
+
+      console.error('Error verificando pago:', err);
+      setError(mensajeError);
+    }
   };
 
   const calcularNeto = (original: string, descuento: string) => {
@@ -136,17 +175,30 @@ export default function DetallePagoPage() {
     if (error) { alert(error); return; }
 
     try {
+      const periodoActual = Number(data?.estudiante?.periodo_id);
+
+      if (!Number.isInteger(periodoActual) || periodoActual < 1) {
+        throw new Error('El estudiante no tiene un período válido.');
+      }
+
       const payload: any = {
         estudiante_id: id,
+        periodo_id: periodoActual,
         tipo: 'mensualidad',
-        concepto: nuevoPago.concepto,
-        monto: parseFloat(nuevoPago.monto_neto),
-        monto_original_usd: parseFloat(nuevoPago.monto_original),
-        descuento_aplicado: parseFloat(nuevoPago.descuento),
+        concepto: nuevoPago.concepto.trim(),
+        monto: Number(nuevoPago.monto_neto),
+        monto_original_usd: Number(nuevoPago.monto_original),
+        descuento_aplicado: Number(nuevoPago.descuento),
         metodo_pago: nuevoPago.metodo_pago,
-        referencia: nuevoPago.referencia,
-        monto_bs: nuevoPago.moneda === 'Bs' ? parseFloat(nuevoPago.monto_bs) : null,
-        tasa_cambio_usada: nuevoPago.moneda === 'Bs' ? parseFloat(nuevoPago.tasa_cambio_usada) : null,
+        referencia: nuevoPago.referencia.trim() || null,
+        monto_bs:
+          nuevoPago.moneda === 'Bs'
+            ? Number(nuevoPago.monto_bs)
+            : null,
+        tasa_cambio_usada:
+          nuevoPago.moneda === 'Bs'
+            ? Number(nuevoPago.tasa_cambio_usada)
+            : null,
       };
 
       const res = await fetch('/api/pagos', {
@@ -180,24 +232,44 @@ export default function DetallePagoPage() {
     return styles[estado as keyof typeof styles] || styles.pendiente;
   };
 
-  if (loading || !data) return (
-    <div className="flex justify-center py-12">
-      <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-900" />
-    </div>
-  );
+  if (loading) { return (
+      <div className="flex justify-center py-12">
+        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-900" />
+      </div>
+    );
+  }
 
-  if (error) return (
-    <div className="max-w-3xl mx-auto py-12 px-6 bg-red-50 border border-red-200 rounded-3xl text-red-700 text-center">
-      <p className="font-bold mb-2">Error al cargar pagos</p>
-      <p>{error}</p>
-    </div>
-  );
+  if (!data) {
+    return (
+      <div className="max-w-3xl mx-auto py-12 px-6 bg-red-50 border border-red-200 rounded-3xl text-red-700 text-center">
+        <p className="font-bold mb-2">No se pudieron cargar los pagos</p>
+        <p>{error || 'No se recibieron datos del estudiante.'}</p>
+        <button
+          type="button"
+          onClick={() => void cargarDatos()}
+          className="mt-4 px-4 py-2 bg-white border border-red-200 rounded-xl"
+        >
+          Reintentar
+        </button>
+      </div>
+    );
+  }
 
-  const { estudiante, pagos, resumen } = data;
+const { estudiante, pagos, resumen } = data;
 
-  return (
-    <div className="space-y-6 animate-in fade-in duration-500 max-w-4xl mx-auto">
-      <div className="flex items-center gap-4">
+return (
+  <div className="space-y-6 animate-in fade-in duration-500 max-w-4xl mx-auto">
+
+    {error && (
+      <div
+        role="alert"
+        className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl"
+      >
+        {error}
+      </div>
+    )}
+
+    <div className="flex items-center gap-4">
         <button onClick={() => router.push('/pagos')}
           className="p-2 hover:bg-white rounded-xl border border-transparent hover:border-slate-200 shadow-sm">
           <ChevronLeft size={24} className="text-slate-600" />
@@ -228,21 +300,25 @@ export default function DetallePagoPage() {
         </div>
 
         {/* DEUDA ACTUAL: mensualidad del mes en curso */}
-        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-          <p className="text-xs font-bold text-slate-400 uppercase">Deuda Actual</p>
-          <p className={`text-2xl font-extrabold ${parseFloat(resumen.deuda_actual) > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
-            {parseFloat(resumen.deuda_actual).toFixed(2)}$
-          </p>
-          <p className="text-[10px] text-slate-400 mt-1">
-            {parseFloat(resumen.deuda_actual) > 0 ? 'Mensualidad del mes (vence día 30)' : 'Mensualidad al día'}
-          </p>
-        </div>
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+          Cuotas pendientes
+        </p>
+
+        <p className="mt-2 text-2xl font-extrabold text-amber-600">
+          {Number(resumen?.cuotas_pendientes ?? 0)}
+        </p>
+
+        <p className="mt-1 text-xs text-slate-400">
+          Del período actual
+        </p>
+      </div>
 
         {/* DEUDA TOTAL: semestre completo menos pagos */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
           <p className="text-xs font-bold text-slate-400 uppercase">Deuda Total</p>
           <p className={`text-2xl font-extrabold ${parseFloat(resumen.deuda_total) > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-            {parseFloat(resumen.deuda_total).toFixed(2)}$
+            {Number(resumen?.deuda_total ?? 0).toFixed(2)}$
           </p>
           <p className="text-[10px] text-slate-400 mt-1">Semestre menos pagos confirmados</p>
         </div>

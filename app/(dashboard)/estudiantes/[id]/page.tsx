@@ -45,9 +45,29 @@ interface Pago {
 
 interface Resumen {
   total_pagado: string;
-  inscripciones_pagadas: string;
-  mensualidades_pagadas: string;
-  pagos_pendientes: string;
+  deuda_total: string;
+  cuotas_pendientes: string;
+}
+
+function estadoNota(nota: number | null | undefined) {
+  if (nota === null || nota === undefined) {
+    return {
+      texto: 'Sin calificar',
+      clase: 'bg-amber-50 text-amber-700 border-amber-200',
+    };
+  }
+
+  if (nota >= 3) {
+    return {
+      texto: 'Aprobada',
+      clase: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    };
+  }
+
+  return {
+    texto: 'Reprobada',
+    clase: 'bg-rose-50 text-rose-700 border-rose-200',
+  };
 }
 
 export default function EstudianteDetallePage() {
@@ -174,24 +194,61 @@ export default function EstudianteDetallePage() {
   };
 
   const handleCongelar = async () => {
-    if (!puedeEditar) return; // ✅ NUEVO
-    if (!confirm('¿Desea congelar/desactivar este estudiante?')) return;
-    try {
-      const res = await fetch(`/api/estudiantes/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activo: false, estado: 'verificacion' })
-      });
-      if (res.ok) { 
-        setSuccess('Estudiante congelado correctamente'); 
-        cargarDatos(); 
-      } else {
-        throw new Error('Error al congelar');
+  if (!puedeEditar || !estudiante) return;
+
+  const estabaActivo = estudiante.activo;
+
+  const confirmarMensaje = estabaActivo
+    ? '¿Desea congelar/desactivar este estudiante?'
+    : '¿Desea activar este estudiante nuevamente?';
+
+  if (!window.confirm(confirmarMensaje)) return;
+
+  try {
+    setError('');
+
+    const res = await fetch(`/api/estudiantes/${id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        activo: !estabaActivo,
+        estado: estabaActivo ? 'verificacion' : 'activo',
+      }),
+    });
+
+    const text = await res.text();
+      let data: any = {};
+
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          data = {};
+        }
+
+        if (!res.ok) {
+          throw new Error(data.error || 'No se pudo actualizar el estado.');
+        }
+
+        setSuccess(
+          estabaActivo
+            ? 'Estudiante congelado correctamente.'
+            : 'Estudiante activado correctamente.'
+        );
+
+        await cargarDatos();
+
+        setTimeout(() => {
+          setSuccess('');
+        }, 3000);
+      } catch (err: any) {
+        console.error('Error actualizando estado del estudiante:', err);
+        setError(
+          err?.message || 'No se pudo actualizar el estado del estudiante.'
+        );
       }
-    } catch (err: any) { 
-      setError(err.message); 
-    }
-  };
+    };
 
   const handleAprobar = async () => {
     if (!puedeEditar) return; // ✅ NUEVO
@@ -523,7 +580,7 @@ export default function EstudianteDetallePage() {
               La API ya no envía "resumen" a un docente (viene null), pero
               este check evita cualquier intento de renderizar datos vacíos. */}
           {puedeEditar && resumen && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
               {[
                 { 
                   label: 'Total Pagado', 
@@ -531,24 +588,34 @@ export default function EstudianteDetallePage() {
                   color: 'text-emerald-600', 
                   bg: 'bg-emerald-50' 
                 },
-                { 
-                  label: 'Inscripción', 
-                  value: parseInt(resumen.inscripciones_pagadas) > 0 ? 'Pagada' : 'Pendiente', 
-                  color: parseInt(resumen.inscripciones_pagadas) > 0 ? 'text-blue-600' : 'text-amber-600', 
-                  bg: parseInt(resumen.inscripciones_pagadas) > 0 ? 'bg-blue-50' : 'bg-amber-50' 
+              
+                
+                {
+                  label: 'Deuda Total',
+                  value: `${parseFloat(resumen.deuda_total).toFixed(2)} $`,
+                  color:
+                    parseFloat(resumen.deuda_total) === 0
+                      ? 'text-emerald-600'
+                      : 'text-rose-600',
+                  bg:
+                    parseFloat(resumen.deuda_total) === 0
+                      ? 'bg-emerald-50'
+                      : 'bg-rose-50',
                 },
-                { 
-                  label: 'Mensualidades', 
-                  value: `${resumen.mensualidades_pagadas}/6`, 
-                  color: 'text-violet-600', 
-                  bg: 'bg-violet-50' 
+                
+                {
+                  label: 'Cuotas Pendientes',
+                  value: resumen.cuotas_pendientes,
+                  color:
+                    parseInt(resumen.cuotas_pendientes, 10) === 0
+                      ? 'text-emerald-600'
+                      : 'text-amber-600',
+                  bg:
+                    parseInt(resumen.cuotas_pendientes, 10) === 0
+                      ? 'bg-emerald-50'
+                      : 'bg-amber-50',
                 },
-                { 
-                  label: 'Pendientes', 
-                  value: resumen.pagos_pendientes, 
-                  color: 'text-rose-600', 
-                  bg: 'bg-rose-50' 
-                },
+
               ].map((stat, i) => (
                 <div key={i} className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
                   <p className="text-[10px] font-bold text-slate-400 uppercase">{stat.label}</p>
@@ -586,7 +653,7 @@ export default function EstudianteDetallePage() {
                     materias.map((mat) => {
                       const nota = parseFloat(mat.nota || '0');
                       const tieneNota = mat.tiene_calificacion;
-                      const aprobada = tieneNota && nota >= 10;
+                      const aprobada = tieneNota && nota >= 3;
 
                       return (
                         <tr key={mat.id} className="hover:bg-slate-50/50">
@@ -713,13 +780,10 @@ export default function EstudianteDetallePage() {
                 <CheckCircle2 size={16} className="text-emerald-500" /> 
                 Pago de inscripción confirmado
               </div>
+              
               <div className="flex items-center gap-2 text-slate-600">
                 <CheckCircle2 size={16} className="text-emerald-500" /> 
-                6 mensualidades pagadas
-              </div>
-              <div className="flex items-center gap-2 text-slate-600">
-                <CheckCircle2 size={16} className="text-emerald-500" /> 
-                Nota ≥ 10 en cada materia del periodo
+                Nota mínima de 3.00 en cada materia del período
               </div>
             </div>
 

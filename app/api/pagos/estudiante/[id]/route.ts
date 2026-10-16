@@ -1,82 +1,159 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
+import { verifyToken } from '@/lib/auth';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
-    const estudianteId = params.id;
+    const token = request.cookies.get('token')?.value ?? '';
+    const actor = verifyToken(token);
 
-    const [est, pagos, configRes] = await Promise.all([
-      pool.query(`SELECT * FROM estudiantes WHERE id = $1`, [estudianteId]),
-      pool.query(`SELECT * FROM pagos WHERE estudiante_id = $1 ORDER BY created_at DESC`, [estudianteId]),
-      pool.query(`SELECT clave, valor FROM configuracion`)
+    if (!actor) {
+      return NextResponse.json(
+        { error: 'No autorizado.' },
+        { status: 401 }
+      );
+    }
+
+    if (!['director', 'secretaria'].includes(actor.rol)) {
+      return NextResponse.json(
+        { error: 'No tiene permisos para consultar pagos.' },
+        { status: 403 }
+      );
+    }
+
+    const { id: estudianteId } = await params;
+
+    const estudianteResult = await pool.query(
+      `
+        SELECT
+          id,
+          nombres,
+          apellidos,
+          cedula,
+          estado,
+          periodo_id
+        FROM estudiantes
+        WHERE id = $1
+      `,
+      [estudianteId]
+    );
+
+    if (estudianteResult.rows.length === 0) {
+      return NextResponse.json(
+        { error: 'Estudiante no encontrado.' },
+        { status: 404 }
+      );
+    }
+
+    const estudiante = estudianteResult.rows[0];
+    const periodoActual = estudiante.periodo_id;
+
+    if (periodoActual === null || periodoActual === undefined) {
+      return NextResponse.json(
+        { error: 'El estudiante no tiene un período asignado.' },
+        { status: 400 }
+      );
+    }
+
+    const [pagosResult, resumenResult] = await Promise.all([
+      pool.query(
+        `
+          SELECT
+            id,
+            estudiante_id,
+            tipo,
+            concepto,
+            monto,
+            monto_bs,
+            metodo_pago,
+            referencia,
+            fecha_pago,
+            estado,
+            observaciones,
+            periodo_id,
+            created_at
+          FROM pagos
+          WHERE estudiante_id = $1
+            AND periodo_id = $2
+          ORDER BY created_at DESC, id DESC
+        `,
+        [estudianteId, periodoActual]
+      ),
+
+      pool.query(
+        `
+          SELECT
+            COALESCE(
+              (
+                SELECT SUM(p.monto)
+                FROM pagos p
+                WHERE p.estudiante_id = $1
+                  AND p.periodo_id = $2
+                  AND p.estado = 'confirmado'
+              ),
+              0
+            ) AS total_pagado,
+
+            COALESCE(
+              (
+                SELECT SUM(c.monto)
+                FROM cuotas c
+                WHERE c.estudiante_id = $1
+                  AND c.periodo_id = $2
+                  AND c.estado IN ('pendiente', 'vencida')
+              ),
+              0
+            ) AS deuda_total,
+
+            (
+              SELECT COUNT(*)
+              FROM cuotas c
+              WHERE c.estudiante_id = $1
+                AND c.periodo_id = $2
+                AND c.estado IN ('pendiente', 'vencida')
+            ) AS cuotas_pendientes
+        `,
+        [estudianteId, periodoActual]
+      ),
     ]);
 
-    if (est.rows.length === 0) {
-      return NextResponse.json({ error: 'Estudiante no encontrado' }, { status: 404 });
-    }
+    const resumen = resumenResult.rows[0];
 
-    const estudiante = est.rows[0];
-
-    // Convertir configuración a objeto plano
-    const config = configRes.rows.reduce((acc, row) => {
-      acc[row.clave] = row.valor;
-      return acc;
-    }, {} as Record<string, string>);
-
-    const montoMensual = parseFloat(config.monto_mensualidad || '50');
-    const costoInscripcion = parseFloat(config.costo_inscripcion || '50');
-    const costoSemestre = parseFloat(config.costo_semestre || (montoMensual * 6).toFixed(2));
-    const totalSemestre = costoInscripcion + costoSemestre;
-
-    // Usar fecha_inicio_periodo_actual si existe, sino fecha_ingreso
-    const fechaInicio = new Date(estudiante.fecha_inicio_periodo_actual || estudiante.fecha_ingreso || estudiante.created_at);
-    const hoy = new Date();
-
-    // Diferencia de meses calendario desde la fecha de ingreso
-    let mesesEsperados = (hoy.getFullYear() - fechaInicio.getFullYear()) * 12 
-                       + (hoy.getMonth() - fechaInicio.getMonth());
-
-    // El mes actual se contabiliza como obligatorio a partir del día 30
-    if (hoy.getDate() >= 30) {
-      mesesEsperados += 1;
-    }
-
-    // Limitar al semestre: máximo 6 mensualidades, mínimo 0
-    mesesEsperados = Math.max(0, Math.min(6, mesesEsperados));
-
-    // Contar mensualidades confirmadas
-    const mensualidadesPagadas = pagos.rows.filter(
-      (p: any) => p.estado === 'confirmado' && p.tipo === 'mensualidad'
-    ).length;
-
-    // Total pagado confirmado (todo concepto)
-    const totalPagado = pagos.rows
-      .filter((p: any) => p.estado === 'confirmado')
-      .reduce((sum: number, p: any) => sum + parseFloat(p.monto), 0);
-
-    // Deuda actual: solo la mensualidad del mes que corresponde ahora
-    const deudaActual = mensualidadesPagadas >= mesesEsperados ? 0 : montoMensual;
-
-    // Deuda total: lo que falta por pagar del semestre completo
-    const deudaTotal = Math.max(0, totalSemestre - totalPagado);
-
-    return NextResponse.json({
-      estudiante,
-      pagos: pagos.rows,
-      resumen: {
-        monto_mensual: montoMensual,
-        meses_esperados: mesesEsperados,
-        total_semestre: totalSemestre,
-        total_pagado: totalPagado,
-        deuda_actual: deudaActual,
-        deuda_total: deudaTotal,
-        mensualidades_pagadas: mensualidadesPagadas
+    return NextResponse.json(
+      {
+        estudiante,
+        pagos: pagosResult.rows,
+        resumen: {
+          periodo_id: periodoActual,
+          total_pagado: Number(resumen?.total_pagado ?? 0),
+          deuda_total: Number(resumen?.deuda_total ?? 0),
+          cuotas_pendientes: Number(
+            resumen?.cuotas_pendientes ?? 0
+          ),
+        },
+      },
+      {
+        headers: {
+          'Cache-Control': 'no-store',
+        },
       }
-    });
+    );
   } catch (error) {
-    console.error('Error GET estudiante pagos:', error);
-    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
+    console.error('Error GET pagos del estudiante:', error);
+
+    return NextResponse.json(
+      { error: 'No se pudo cargar el historial de pagos.' },
+      { status: 500 }
+    );
   }
 }
