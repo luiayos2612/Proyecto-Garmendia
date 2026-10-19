@@ -27,9 +27,14 @@ interface Materia {
   id: string;
   nombre: string;
   codigo: string;
-  nota: string;
+  nota: string | number | null;
+  resultado_cualitativo?: 'AP' | 'IN' | null;
+  tipo_evaluacion?: 'numerica' | 'cualitativa';
   tiene_calificacion: boolean;
   activa: boolean;
+  inscripcion_id: string;
+  tipo_inscripcion: 'regular' | 'tutoria';
+  periodo_origen_tutoria: number | null;
 }
 
 interface Pago {
@@ -77,6 +82,7 @@ export default function EstudianteDetallePage() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [eliminando, setEliminando] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [estudiante, setEstudiante] = useState<Estudiante | null>(null);
   const [formData, setFormData] = useState<Partial<Estudiante>>({});
@@ -176,20 +182,58 @@ export default function EstudianteDetallePage() {
   };
 
   const handleEliminar = async () => {
-    if (!puedeEditar) return; // ✅ NUEVO
-    if (!confirm('¿Está seguro de eliminar este estudiante? Se desactivará del sistema.')) return;
+    if (!puedeEditar || !estudiante || eliminando) return;
+
+    const confirmado = window.confirm(
+      `¿Desea eliminar definitivamente a ` +
+        `${estudiante.apellidos} ${estudiante.nombres}?\n\n` +
+        `Se eliminarán su ficha, calificaciones, historial académico, ` +
+        `inscripciones, cupos, cuotas, pagos y auditorías identificadas.\n\n` +
+        `Esta acción no es una desactivación y no se puede deshacer ` +
+        `desde el sistema.`
+    );
+
+    if (!confirmado) return;
+
+    setEliminando(true);
+    setError('');
+    setSuccess('');
+
     try {
-      const res = await fetch(`/api/estudiantes/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        router.push('/estudiantes');
-        return;
-      }
+      const res = await fetch(`/api/estudiantes/${id}`, {
+        method: 'DELETE',
+      });
+
       const text = await res.text();
-      let errMsg = 'Error al eliminar';
-      try { const json = JSON.parse(text); errMsg = json.error || errMsg; } catch {}
-      throw new Error(errMsg);
-    } catch (err: any) { 
-      setError(err.message); 
+
+      let data: {
+        success?: boolean;
+        error?: string;
+        message?: string;
+      } = {};
+
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
+
+      if (!res.ok || data.success !== true) {
+        throw new Error(
+          data.error || 'No se pudo eliminar definitivamente al estudiante.'
+        );
+      }
+
+      router.replace('/estudiantes');
+      router.refresh();
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Ocurrió un error al eliminar al estudiante.'
+      );
+    } finally {
+      setEliminando(false);
     }
   };
 
@@ -337,7 +381,7 @@ export default function EstudianteDetallePage() {
 
   const inputClass = "w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all";
   const labelClass = "text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5 block";
-  const puedeAprobar = puedeEditar && estudiante.periodo_id < 6 && !cupoPendiente && estudiante.activo; // ✅ MODIFICADO
+  const puedeAprobar = puedeEditar &&  estudiante.periodo_id <= 6 && !cupoPendiente && estudiante.activo; // ✅ MODIFICADO
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500 max-w-5xl mx-auto">
@@ -560,15 +604,22 @@ export default function EstudianteDetallePage() {
                   onClick={() => setShowAprobarModal(true)}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-semibold text-sm hover:bg-emerald-700 transition-all shadow-lg"
                 >
-                  <CheckCircle2 size={16} /> Aprobar Siguiente Periodo
+                  <CheckCircle2 size={16} /> Evaluar cierre de período
                 </button>
               )}
 
-              <button 
+              <button
                 onClick={handleEliminar}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-white text-rose-600 border border-rose-200 rounded-xl font-semibold text-sm hover:bg-rose-50 transition-all"
+                disabled={eliminando || saving}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-white text-rose-600 border border-rose-200 rounded-xl font-semibold text-sm hover:bg-rose-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Trash2 size={16} /> Eliminar Estudiante
+                {eliminando ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Trash2 size={16} />
+                )}
+
+                {eliminando ? 'Eliminando...' : 'Eliminar definitivamente'}
               </button>
             </div>
           )}
@@ -650,42 +701,96 @@ export default function EstudianteDetallePage() {
                       </td>
                     </tr>
                   ) : (
-                    materias.map((mat) => {
-                      const nota = parseFloat(mat.nota || '0');
-                      const tieneNota = mat.tiene_calificacion;
-                      const aprobada = tieneNota && nota >= 3;
+                      materias.map((mat) => {
+                        const resultado = mat.resultado_cualitativo;
 
-                      return (
-                        <tr key={mat.id} className="hover:bg-slate-50/50">
-                          <td className="py-3 px-6">
-                            <p className="text-sm font-bold text-slate-900">{mat.nombre}</p>
-                            <p className="text-xs text-slate-500">{mat.codigo}</p>
-                          </td>
+                        const esCualitativa =
+                          mat.tipo_evaluacion === 'cualitativa';
 
-                          <td className="py-3 px-6 text-center">
-                            {tieneNota ? (
-                              <span className={`text-sm font-bold font-mono ${aprobada ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                {nota.toFixed(1)}
-                              </span>
-                            ) : (
-                              <span className="text-sm text-slate-400 font-mono">-</span>
-                            )}
-                          </td>
+                        const notaNumerica =
+                          mat.nota == null ? null : Number(mat.nota);
 
-                          <td className="py-3 px-4 text-center">
-                            {tieneNota ? (
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${aprobada ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-rose-50 text-rose-700 border-rose-200'}`}>
-                                {aprobada ? 'Aprobada' : 'Reprobada'}
+                        const tieneNotaNumerica =
+                          !esCualitativa &&
+                          mat.tiene_calificacion &&
+                          notaNumerica !== null &&
+                          Number.isFinite(notaNumerica);
+
+                        let textoCalificacion = '—';
+                        let textoEstado = 'Sin calificar';
+
+                        let colorCalificacion = 'text-slate-400';
+
+                        let claseEstado =
+                          'bg-amber-50 text-amber-700 border-amber-200';
+
+                        if (resultado === 'AP') {
+                          textoCalificacion = 'AP';
+                          textoEstado = 'Aprobado';
+                          colorCalificacion = 'text-emerald-600';
+                          claseEstado =
+                            'bg-emerald-50 text-emerald-700 border-emerald-200';
+                        } else if (resultado === 'IN') {
+                          textoCalificacion = 'IN';
+                          textoEstado = 'Inasistentes';
+                          colorCalificacion = 'text-amber-600';
+                          claseEstado =
+                            'bg-amber-50 text-amber-700 border-amber-200';
+                        } else if (tieneNotaNumerica && notaNumerica !== null) {
+                          const aprobada = notaNumerica >= 3;
+
+                          textoCalificacion = notaNumerica.toFixed(2);
+                          textoEstado = aprobada ? 'Aprobada' : 'Reprobada';
+
+                          colorCalificacion = aprobada
+                            ? 'text-emerald-600'
+                            : 'text-rose-600';
+
+                          claseEstado = aprobada
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : 'bg-rose-50 text-rose-700 border-rose-200';
+                        }
+
+                        return (
+                          <tr
+                            key={mat.inscripcion_id}
+                            className="hover:bg-slate-50/50"
+                          >
+                            <td className="py-3 px-6">
+                              <p className="text-sm font-bold text-slate-900">
+                                {mat.nombre}
+                              </p>
+                              <p className="text-xs text-slate-500">
+                                {mat.codigo}
+                              </p>
+
+                              <p className="text-[10px] text-slate-500 mt-1">
+                                {mat.tipo_inscripcion === 'tutoria'
+                                  ? `Tutoría del período ${
+                                      mat.periodo_origen_tutoria ?? '—'
+                                    }`
+                                  : 'Regular'}
+                              </p>
+                            </td>
+
+                            <td className="py-3 px-6 text-center">
+                              <span
+                                className={`text-sm font-bold font-mono ${colorCalificacion}`}
+                              >
+                                {textoCalificacion}
                               </span>
-                            ) : (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border bg-amber-50 text-amber-700 border-amber-200">
-                                Sin calificar
+                            </td>
+
+                            <td className="py-3 px-4 text-center">
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${claseEstado}`}
+                              >
+                                {textoEstado}
                               </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })
+                            </td>
+                          </tr>
+                        );
+                      })
                   )}
                 </tbody>
               </table>
@@ -759,7 +864,7 @@ export default function EstudianteDetallePage() {
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <GraduationCap size={20} className="text-emerald-600" /> 
-                Aprobar Periodo
+                Evaluar cierre académico
               </h3>
               <button 
                 onClick={() => setShowAprobarModal(false)} 
@@ -770,20 +875,51 @@ export default function EstudianteDetallePage() {
             </div>
 
             <p className="text-sm text-slate-600">
-              Esta acción validará que el estudiante cumpla con todos los requisitos para pasar al{' '}
-              <strong>Periodo {estudiante.periodo_id + 1}</strong>.
+              El sistema revisará las calificaciones,
+              las tutorías y la liquidación financiera
+              para determinar si corresponde avanzar,
+              repetir o culminar. Esta acción prepara
+              una solicitud pendiente en Cupos;
+              todavía no cambia el período.
             </p>
 
             <div className="bg-slate-50 rounded-xl p-4 space-y-2 text-sm">
-              <p className="font-semibold text-slate-700 mb-2">Requisitos a validar:</p>
-              <div className="flex items-center gap-2 text-slate-600">
-                <CheckCircle2 size={16} className="text-emerald-500" /> 
-                Pago de inscripción confirmado
+              <p className="font-semibold text-slate-700 mb-2">
+                Requisitos a validar
+              </p>
+
+              <div className="flex items-start gap-2 text-slate-600">
+                <CheckCircle2
+                  size={16}
+                  className="text-emerald-500 shrink-0 mt-0.5"
+                />
+                <span>
+                  Todas las materias inscritas deben
+                  tener una calificación válida.
+                </span>
               </div>
-              
-              <div className="flex items-center gap-2 text-slate-600">
-                <CheckCircle2 size={16} className="text-emerald-500" /> 
-                Nota mínima de 3.00 en cada materia del período
+
+              <div className="flex items-start gap-2 text-slate-600">
+                <CheckCircle2
+                  size={16}
+                  className="text-emerald-500 shrink-0 mt-0.5"
+                />
+                <span>
+                  El saldo del intento y las obligaciones
+                  anteriores deben estar liquidados.
+                </span>
+              </div>
+
+              <div className="flex items-start gap-2 text-slate-600">
+                <CheckCircle2
+                  size={16}
+                  className="text-emerald-500 shrink-0 mt-0.5"
+                />
+                <span>
+                  Se revisarán las materias reprobadas,
+                  las tutorías pendientes y las
+                  complementarias aprobadas.
+                </span>
               </div>
             </div>
 

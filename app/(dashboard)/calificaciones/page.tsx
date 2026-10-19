@@ -17,6 +17,7 @@ interface Calificacion {
   periodo_id: number;
   periodo_nombre: string;
   observaciones: string;
+  resultado_cualitativo?: 'AP' | 'IN' | null;
 }
 
 interface Stat { periodo_id: number; periodo_nombre: string; total: string; }
@@ -68,14 +69,40 @@ export default function CalificacionesPage() {
     c.materia?.toLowerCase().includes(busqueda.toLowerCase())
   );
 
-  const notaColor = (nota: number | null) => {
-    if (nota === null) return 'bg-slate-100 text-slate-500';
-    if (nota >= 18)    return 'bg-emerald-100 text-emerald-700';
-    if (nota >= 10)    return 'bg-blue-100 text-blue-700';
-    return 'bg-red-100 text-red-700';
+  const notaColor = (
+    nota: number | string | null,
+    resultado?: 'AP' | 'IN' | null
+    ) => {
+    if (resultado === 'AP') {
+      return 'bg-emerald-100 text-emerald-700';
+    }
+
+    if (resultado === 'IN') {
+      return 'bg-amber-100 text-amber-700';
+    }
+
+    if (nota == null || !Number.isFinite(Number(nota))) {
+      return 'bg-slate-100 text-slate-500';
+    }
+
+    return Number(nota) >= 3
+      ? 'bg-emerald-100 text-emerald-700'
+      : 'bg-red-100 text-red-700';
   };
 
   const selectClass = "px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:border-blue-500";
+  const abrirCalificacionesDelEstudiante = (
+    estudianteId: string,
+    periodoId: number
+  ) => {
+    const params = new URLSearchParams({
+      modo: 'estudiante',
+      estudiante_id: estudianteId,
+      periodo_id: String(periodoId),
+    });
+
+    router.push(`/calificaciones/nuevo?${params.toString()}`);
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -202,7 +229,16 @@ export default function CalificacionesPage() {
                   filtradas.map(c => (
                     <tr key={c.id} className="hover:bg-slate-50/50 transition-colors">
                       <td className="py-4 px-6">
-                        <p className="font-bold text-slate-900 text-sm">{c.estudiante}</p>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            abrirCalificacionesDelEstudiante(c.estudiante_id, c.periodo_id)
+                          }
+                          className="font-bold text-slate-900 text-sm text-left hover:text-blue-700 hover:underline transition-colors"
+                          title="Cargar o editar las calificaciones de este estudiante"
+                        >
+                          {c.estudiante}
+                        </button>
                       </td>
                       <td className="py-4 px-6">
                         <div>
@@ -214,9 +250,23 @@ export default function CalificacionesPage() {
                         <p className="text-sm text-slate-600">{c.docente}</p>
                       </td>
                       <td className="py-4 px-6">
-                        <span className={`px-3 py-1.5 rounded-lg text-sm font-extrabold ${notaColor(c.nota)}`}>
-                          {c.nota !== null ? parseFloat(String(c.nota)).toFixed(2) : '—'}
-                        </span>
+                        <span
+                        title={
+                          c.resultado_cualitativo === 'AP'
+                            ? 'Aprobado'
+                            : c.resultado_cualitativo === 'IN'
+                              ? 'Inasistentes'
+                              : undefined
+                        }
+                        className={`px-3 py-1.5 rounded-lg text-sm font-extrabold ${
+                          notaColor(c.nota, c.resultado_cualitativo)
+                        }`}
+                         >
+                        {c.resultado_cualitativo ||
+                          (c.nota != null && Number.isFinite(Number(c.nota))
+                            ? Number(c.nota).toFixed(2)
+                            : '—')}
+                      </span>
                       </td>
                       <td className="py-4 px-6">
                         <span className="px-2.5 py-1 bg-blue-50 text-blue-700 border border-blue-100 rounded-full text-xs font-bold">
@@ -224,9 +274,16 @@ export default function CalificacionesPage() {
                         </span>
                       </td>
                       <td className="py-4 px-6 text-right">
-                        <button className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all">
-                          <ChevronRight size={16} />
-                        </button>
+                        <button
+                        type="button"
+                        onClick={() =>
+                          abrirCalificacionesDelEstudiante(c.estudiante_id, c.periodo_id)
+                        }
+                        aria-label={`Abrir calificaciones de ${c.estudiante}`}
+                        title="Cargar o editar notas del estudiante"
+                        className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all">
+                        <ChevronRight size={16} />
+                      </button>
                       </td>
                     </tr>
                   ))

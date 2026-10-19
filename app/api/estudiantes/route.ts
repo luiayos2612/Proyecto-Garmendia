@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
 import { verifyToken } from '@/lib/auth';
+import { crearMensualidadesDelIntento } from '@/lib/finanzasAcademicas';
+import { tipoEvaluacionMateria } from '@/lib/evaluacionMaterias';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -125,139 +127,454 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (actor.rol === 'docente') {
+  if (!['director', 'secretaria'].includes(actor.rol)) {
     return NextResponse.json(
       { error: 'No tiene permisos para crear estudiantes.' },
       { status: 403 }
     );
   }
 
-  const client = await pool.connect();
+  class ErrorAlta extends Error {
+    constructor(
+      public status: number,
+      message: string
+    ) {
+      super(message);
+    }
+  }
+
+  const leerTexto = (
+    valor: unknown,
+    nombre: string,
+    maximo: number,
+    obligatorio = false
+  ) => {
+    if (
+      valor !== undefined &&
+      valor !== null &&
+      typeof valor !== 'string'
+    ) {
+      throw new ErrorAlta(
+        400,
+        `${nombre} debe ser texto.`
+      );
+    }
+
+    const texto =
+      typeof valor === 'string' ? valor.trim() : '';
+
+    if (obligatorio && !texto) {
+      throw new ErrorAlta(
+        400,
+        `${nombre} es obligatorio.`
+      );
+    }
+
+    if (texto.length > maximo) {
+      throw new ErrorAlta(
+        400,
+        `${nombre} no puede superar ${maximo} caracteres.`
+      );
+    }
+
+    return texto;
+  };
+
+  const esDineroValido = (valor: number) =>
+    Number.isFinite(valor) &&
+    valor > 0 &&
+    Math.abs(valor * 100 - Math.round(valor * 100)) <= 0.000001;
+
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  let client: import('pg').PoolClient | undefined;
+  let transaccionAbierta = false;
 
   try {
-    await client.query('BEGIN');
+    let recibido: unknown;
 
-    const body = await request.json();
-
-    const {
-      cedula,
-      cedula_escolar,
-      apellidos,
-      nombres,
-      fecha_nacimiento,
-      genero,
-      email,
-      periodo_id,
-      pago,
-      materias_complementarias = [],
-    }: {
-      cedula?: string;
-      cedula_escolar?: string | null;
-      apellidos?: string;
-      nombres?: string;
-      fecha_nacimiento?: string | null;
-      genero?: string;
-      email?: string | null;
-      periodo_id?: number | string;
-      pago?: PagoInscripcion;
-      materias_complementarias?: string[];
-    } = body;
-
-    const periodoId = Number(periodo_id);
+    try {
+      recibido = await request.json();
+    } catch {
+      throw new ErrorAlta(400, 'La solicitud no contiene un JSON válido.');
+    }
 
     if (
-      !cedula ||
-      !apellidos ||
-      !nombres ||
-      !genero ||
-      !Number.isInteger(periodoId)
+      typeof recibido !== 'object' ||
+      recibido === null ||
+      Array.isArray(recibido)
     ) {
-      await client.query('ROLLBACK');
+      throw new ErrorAlta(400, 'La solicitud no tiene un formato válido.');
+    }
 
-      return NextResponse.json(
-        {
-          error:
-            'Cédula, apellidos, nombres, período y género son obligatorios.',
-        },
-        { status: 400 }
+    const body = recibido as Record<string, unknown>;
+
+    const cedula = leerTexto(
+      body.cedula,
+      'Cédula',
+      20,
+      true
+    );
+
+    const cedulaEscolar = leerTexto(
+      body.cedula_escolar,
+      'Cédula escolar',
+      20
+    );
+
+    const apellidos = leerTexto(
+      body.apellidos,
+      'Apellidos',
+      100,
+      true
+    );
+
+    const nombres = leerTexto(
+      body.nombres,
+      'Nombres',
+      100,
+      true
+    );
+
+    const genero = leerTexto(
+      body.genero,
+      'Género',
+      10,
+      true
+    );
+
+    const email = leerTexto(
+      body.email,
+      'Correo electrónico',
+      100
+    );
+
+    const fechaNacimiento = leerTexto(
+      body.fecha_nacimiento,
+      'Fecha de nacimiento',
+      10
+    );
+
+    const periodoId = Number(body.periodo_id);
+
+    if (
+      !Number.isInteger(periodoId) ||
+      periodoId < 1 ||
+      periodoId > 6
+    ) {
+      throw new ErrorAlta(
+        400,
+        'El período debe ser un número entre 1 y 6.'
       );
     }
 
-    if (periodoId < 1 || periodoId > 6) {
-      await client.query('ROLLBACK');
+    if (!['Masculino', 'Femenino'].includes(genero)) {
+      throw new ErrorAlta(400, 'El género indicado no es válido.');
+    }
 
-      return NextResponse.json(
-        { error: 'El período debe estar entre 1 y 6.' },
-        { status: 400 }
+    if (
+      email &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ) {
+      throw new ErrorAlta(400, 'El correo electrónico no es válido.');
+    }
+
+    if (
+      fechaNacimiento &&
+      !/^\d{4}-\d{2}-\d{2}$/.test(fechaNacimiento)
+    ) {
+      throw new ErrorAlta(
+        400,
+        'La fecha de nacimiento debe utilizar el formato AAAA-MM-DD.'
       );
     }
 
-    if (!pago?.monto || !pago?.metodo_pago) {
-      await client.query('ROLLBACK');
+    const seleccionRecibida = body.materias_complementarias ?? [];
 
-      return NextResponse.json(
-        {
-          error:
-            'Debe registrar los datos del pago de inscripción para completar el registro.',
-        },
-        { status: 400 }
+    if (
+      !Array.isArray(seleccionRecibida) ||
+      seleccionRecibida.length > 2 ||
+      seleccionRecibida.some(
+        (id: unknown) =>
+          typeof id !== 'string' || !uuidRegex.test(id)
+      )
+    ) {
+      throw new ErrorAlta(
+        400,
+        'Seleccione como máximo dos materias complementarias válidas.'
       );
+    }
+
+    const complementariasSeleccionadas = (
+      seleccionRecibida as string[]
+    ).map((id) => id.toLowerCase());
+
+    if (
+      new Set(complementariasSeleccionadas).size !==
+      complementariasSeleccionadas.length
+    ) {
+      throw new ErrorAlta(
+        400,
+        'No puede seleccionar la misma complementaria dos veces.'
+      );
+    }
+
+    if (
+      typeof body.pago !== 'object' ||
+      body.pago === null ||
+      Array.isArray(body.pago)
+    ) {
+      throw new ErrorAlta(
+        400,
+        'Debe registrar los datos del pago de inscripción.'
+      );
+    }
+
+    const pago = body.pago as Record<string, unknown>;
+
+    if (
+      !['number', 'string'].includes(typeof pago.monto) ||
+      String(pago.monto).trim() === ''
+    ) {
+      throw new ErrorAlta(400, 'El monto de inscripción es inválido.');
     }
 
     const montoPago = Number(pago.monto);
 
-    if (!Number.isFinite(montoPago) || montoPago <= 0) {
-      await client.query('ROLLBACK');
-
-      return NextResponse.json(
-        { error: 'El monto del pago de inscripción no es válido.' },
-        { status: 400 }
+    if (!esDineroValido(montoPago)) {
+      throw new ErrorAlta(
+        400,
+        'El monto de inscripción debe ser positivo y tener máximo dos decimales.'
       );
     }
 
-    const metodosEnBs = ['Pago Móvil', 'Transferencia Bs'];
-    const esPagoBs = metodosEnBs.includes(pago.metodo_pago);
+    const metodoPago = leerTexto(
+      pago.metodo_pago,
+      'Método de pago',
+      50,
+      true
+    );
+
+    const metodosPermitidos = [
+      'Efectivo USD',
+      'Zelle',
+      'Pago Móvil',
+      'Transferencia Bs',
+    ];
+
+    if (!metodosPermitidos.includes(metodoPago)) {
+      throw new ErrorAlta(400, 'El método de pago no es válido.');
+    }
+
+    const referencia = leerTexto(
+      pago.referencia,
+      'Referencia',
+      100
+    );
+
+    const fechaPago = leerTexto(
+      pago.fecha_pago,
+      'Fecha de pago',
+      10
+    );
+
+    if (
+      fechaPago &&
+      !/^\d{4}-\d{2}-\d{2}$/.test(fechaPago)
+    ) {
+      throw new ErrorAlta(
+        400,
+        'La fecha de pago debe utilizar el formato AAAA-MM-DD.'
+      );
+    }
+
+    const esPagoBs = [
+      'Pago Móvil',
+      'Transferencia Bs',
+    ].includes(metodoPago);
+
+    let montoBs: number | null = null;
+    let tasaCambio: number | null = null;
 
     if (esPagoBs) {
-      if (!pago.monto_bs || !pago.tasa_cambio_usada) {
-        await client.query('ROLLBACK');
-
-        return NextResponse.json(
-          {
-            error:
-              'Para pagos en bolívares debe indicar monto_bs y tasa_cambio_usada.',
-          },
-          { status: 400 }
-        );
-      }
-
-      const montoBs = Number(pago.monto_bs);
-      const tasaCambio = Number(pago.tasa_cambio_usada);
-      const esperado = montoPago * tasaCambio;
+      montoBs = Number(pago.monto_bs);
+      tasaCambio = Number(pago.tasa_cambio_usada);
 
       if (
         !Number.isFinite(montoBs) ||
         !Number.isFinite(tasaCambio) ||
-        Math.abs(esperado - montoBs) > 0.01
+        montoBs <= 0 ||
+        tasaCambio <= 0 ||
+        Math.abs(montoPago * tasaCambio - montoBs) > 0.011
       ) {
-        await client.query('ROLLBACK');
-
-        return NextResponse.json(
-          {
-            error: `Monto en Bs no coincide. Esperado: ${esperado.toFixed(
-              2
-            )}, recibido: ${montoBs.toFixed(2)}.`,
-          },
-          { status: 422 }
+        throw new ErrorAlta(
+          400,
+          'El monto en bolívares y la tasa no coinciden con el monto en USD.'
         );
       }
     }
 
-    /*
-      1. Crear estudiante.
-      Empieza en estado "deuda" porque a continuación se crearán
-      inscripción y seis mensualidades pendientes.
-    */
+    client = await pool.connect();
+
+    await client.query('BEGIN');
+    transaccionAbierta = true;
+    await client.query(
+      "SET LOCAL TIME ZONE 'America/Caracas'"
+    );
+
+    const periodoResult = await client.query(
+      'SELECT numero FROM periodos WHERE numero = $1',
+      [periodoId]
+    );
+
+    if (periodoResult.rows.length === 0) {
+      throw new ErrorAlta(400, 'El período seleccionado no existe.');
+    }
+
+    const configuracionResult = await client.query(
+      `
+        SELECT clave, valor
+        FROM configuracion
+        WHERE clave IN (
+          'ano_escolar',
+          'costo_inscripcion',
+          'monto_mensualidad'
+        )
+      `
+    );
+
+    const configuracion: Record<string, string> = {};
+
+    for (const fila of configuracionResult.rows) {
+      configuracion[fila.clave] = fila.valor;
+    }
+
+    const anoEscolar = configuracion.ano_escolar?.trim();
+    const costoInscripcion = Number(configuracion.costo_inscripcion);
+    const montoMensualidad = Number(configuracion.monto_mensualidad);
+
+    if (
+      !anoEscolar ||
+      !/^\d{4}-\d{4}$/.test(anoEscolar)
+    ) {
+      throw new ErrorAlta(
+        400,
+        'Configure ano_escolar con el formato AAAA-AAAA antes de inscribir.'
+      );
+    }
+
+    if (
+      !esDineroValido(costoInscripcion) ||
+      !esDineroValido(montoMensualidad)
+    ) {
+      throw new ErrorAlta(
+        400,
+        'Revise costo_inscripcion y monto_mensualidad en la configuración.'
+      );
+    }
+
+    if (Math.abs(montoPago - costoInscripcion) > 0.001) {
+      throw new ErrorAlta(
+        400,
+        'El monto enviado no coincide con el costo de inscripción vigente. ' +
+          'Recargue el formulario.'
+      );
+    }
+
+    if (fechaNacimiento) {
+      const fechaResult = await client.query(
+        'SELECT $1::date > CURRENT_DATE AS es_futura',
+        [fechaNacimiento]
+      );
+
+      if (fechaResult.rows[0].es_futura) {
+        throw new ErrorAlta(
+          400,
+          'La fecha de nacimiento no puede ser futura.'
+        );
+      }
+    }
+
+    const materiasResult = await client.query(
+      `
+        SELECT DISTINCT
+          m.id,
+          m.nombre,
+          pm.es_obligatoria
+        FROM periodo_materia pm
+        JOIN materias m ON m.id = pm.materia_id
+        WHERE pm.periodo_id = $1
+          AND m.activa = true
+      `,
+      [periodoId]
+    );
+
+    const obligatorias = materiasResult.rows.filter(
+      (materia) =>
+        materia.es_obligatoria === true &&
+        tipoEvaluacionMateria(materia.nombre) === 'numerica'
+    );
+
+    const complementarias = materiasResult.rows.filter(
+      (materia) =>
+        materia.es_obligatoria === false &&
+        tipoEvaluacionMateria(materia.nombre) === 'cualitativa'
+    );
+
+    if (obligatorias.length === 0) {
+      throw new ErrorAlta(
+        400,
+        'El período no tiene materias obligatorias activas configuradas.'
+      );
+    }
+
+    const idsComplementarias = new Set<string>(
+      complementarias.map((materia) =>
+        String(materia.id).toLowerCase()
+      )
+    );
+
+    if (
+      complementariasSeleccionadas.some(
+        (id) => !idsComplementarias.has(id)
+      )
+    ) {
+      throw new ErrorAlta(
+        400,
+        'Una complementaria seleccionada no está disponible en este período.'
+      );
+    }
+
+    // Un nuevo alumno que ingresa directamente al período 6
+    // todavía no tiene AP previos dentro del sistema.
+    let complementariasAInscribir = complementariasSeleccionadas;
+
+    if (periodoId === 6) {
+      const nombresComplementarias = new Set(
+        complementarias.map((materia) =>
+          materia.nombre
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .trim()
+            .toUpperCase()
+        )
+      );
+
+      if (
+        complementarias.length !== 2 ||
+        !nombresComplementarias.has('IDIOMAS') ||
+        !nombresComplementarias.has('OFICIO')
+      ) {
+        throw new ErrorAlta(
+          400,
+          'El período 6 debe tener configuradas Idiomas y Oficio como complementarias activas.'
+        );
+      }
+
+      complementariasAInscribir = Array.from(idsComplementarias);
+    }
+
     const estudianteResult = await client.query(
       `
         INSERT INTO estudiantes (
@@ -274,7 +591,7 @@ export async function POST(request: NextRequest) {
           fecha_inicio_periodo_actual
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8,
+          $1, $2, $3, $4, $5::date, $6, $7, $8,
           'deuda',
           true,
           CURRENT_DATE
@@ -283,10 +600,10 @@ export async function POST(request: NextRequest) {
       `,
       [
         cedula,
-        cedula_escolar || null,
+        cedulaEscolar || null,
         nombres,
         apellidos,
-        fecha_nacimiento || null,
+        fechaNacimiento || null,
         genero,
         email || null,
         periodoId,
@@ -296,146 +613,95 @@ export async function POST(request: NextRequest) {
     const estudiante = estudianteResult.rows[0];
     const estudianteId = estudiante.id;
 
-    /*
-      2. Inscribir materias obligatorias.
-    */
-    const obligatoriasResult = await client.query(
+    const intentoResult = await client.query(
       `
-        SELECT materia_id
-        FROM periodo_materia
-        WHERE periodo_id = $1
-          AND es_obligatoria = true
-        ORDER BY orden
+        INSERT INTO intentos_academicos (
+          estudiante_id,
+          periodo_id,
+          numero_intento,
+          ano_escolar,
+          estado,
+          fecha_inicio
+        )
+        VALUES ($1, $2, 1, $3, 'en_curso', CURRENT_DATE)
+        RETURNING *
       `,
-      [periodoId]
+      [estudianteId, periodoId, anoEscolar]
     );
 
-    let materiasInscritas = 0;
+    const intento = intentoResult.rows[0];
 
-    for (const materia of obligatoriasResult.rows) {
-      const insertResult = await client.query(
+    const materiasAInscribir = Array.from(
+      new Set<string>([
+        ...obligatorias.map((materia) => String(materia.id)),
+        ...complementariasAInscribir,
+      ])
+    );
+
+    for (const materiaId of materiasAInscribir) {
+      await client.query(
         `
           INSERT INTO inscripciones_materias (
             estudiante_id,
             materia_id,
             periodo_id,
             ano_escolar,
-            activa
+            activa,
+            intento_id,
+            tipo_inscripcion,
+            tutoria_id
           )
-          VALUES ($1, $2, $3, '2025-2026', true)
-          ON CONFLICT DO NOTHING
-          RETURNING id
+          VALUES (
+            $1, $2, $3, $4, true, $5, 'regular', NULL
+          )
         `,
-        [estudianteId, materia.materia_id, periodoId]
-      );
-
-      if (insertResult.rows.length > 0) {
-        materiasInscritas += 1;
-      }
-    }
-
-    /*
-      3. Inscribir materias complementarias seleccionadas.
-    */
-    if (
-      Array.isArray(materias_complementarias) &&
-      materias_complementarias.length > 0
-    ) {
-      for (const materiaId of materias_complementarias) {
-        const insertResult = await client.query(
-          `
-            INSERT INTO inscripciones_materias (
-              estudiante_id,
-              materia_id,
-              periodo_id,
-              ano_escolar,
-              activa
-            )
-            VALUES ($1, $2, $3, '2025-2026', true)
-            ON CONFLICT DO NOTHING
-            RETURNING id
-          `,
-          [estudianteId, materiaId, periodoId]
-        );
-
-        if (insertResult.rows.length > 0) {
-          materiasInscritas += 1;
-        }
-      }
-    }
-
-    /*
-      4. Obtener costos vigentes.
-      Se usa configuración para cuotas, no el monto manual del formulario,
-      porque la deuda oficial del período debe venir de configuración.
-    */
-    const configuracionResult = await client.query(
-      `
-        SELECT clave, valor
-        FROM configuracion
-        WHERE clave IN ('costo_inscripcion', 'monto_mensualidad')
-      `
-    );
-
-    const configuracion: Record<string, string> = {};
-
-    for (const fila of configuracionResult.rows) {
-      configuracion[fila.clave] = fila.valor;
-    }
-
-    const costoInscripcion = Number(
-      configuracion.costo_inscripcion ?? montoPago
-    );
-
-    const montoMensualidad = Number(
-      configuracion.monto_mensualidad ?? 50
-    );
-
-    if (
-      !Number.isFinite(costoInscripcion) ||
-      costoInscripcion <= 0 ||
-      !Number.isFinite(montoMensualidad) ||
-      montoMensualidad <= 0
-    ) {
-      throw new Error(
-        'La configuración financiera es inválida. Revise costo_inscripcion y monto_mensualidad.'
+        [
+          estudianteId,
+          materiaId,
+          periodoId,
+          anoEscolar,
+          intento.id,
+        ]
       );
     }
 
-    /*
-      5. Crear la cuota pendiente de inscripción.
-      Es la obligación que se marcará como pagada al confirmar el pago.
-    */
     await client.query(
       `
         INSERT INTO cuotas (
           estudiante_id,
+          intento_id,
           periodo_id,
+          tipo_cuota,
+          numero_mensualidad,
           concepto,
           monto,
           fecha_vencimiento,
           estado
         )
         VALUES (
-          $1,
-          $2,
+          $1, $2, $3,
+          'inscripcion',
+          NULL,
           'Inscripción',
-          $3,
+          $4,
           CURRENT_DATE,
           'pendiente'
         )
       `,
-      [estudianteId, periodoId, costoInscripcion]
+      [
+        estudianteId,
+        intento.id,
+        periodoId,
+        costoInscripcion,
+      ]
     );
 
-    /*
-      6. Crear el pago de inscripción, visible en la página de pagos.
-      Mantiene el método/referencia real registrados en el formulario.
-    */
-    await client.query(
+    const pagoResult = await client.query(
       `
         INSERT INTO pagos (
           estudiante_id,
+          intento_id,
+          periodo_id,
           tipo,
           concepto,
           monto,
@@ -446,94 +712,73 @@ export async function POST(request: NextRequest) {
           metodo_pago,
           referencia,
           fecha_pago,
-          estado,
-          periodo_id
+          estado
         )
         VALUES (
-          $1,
+          $1, $2, $3,
           'inscripcion',
           'Inscripción',
-          $2,
-          $3,
-          0,
-          $4,
-          $5,
-          $6,
-          $7,
-          $8,
-          'verificacion',
-          $9
+          $4, $4, 0,
+          $5, $6, $7, $8,
+          COALESCE($9::date, CURRENT_DATE),
+          'verificacion'
         )
+        RETURNING id
       `,
       [
         estudianteId,
-        montoPago,
-        montoPago,
-        esPagoBs ? Number(pago.monto_bs) : null,
-        esPagoBs ? Number(pago.tasa_cambio_usada) : null,
-        pago.metodo_pago,
-        pago.referencia || null,
-        pago.fecha_pago || new Date().toISOString().slice(0, 10),
+        intento.id,
         periodoId,
+        montoPago,
+        montoBs,
+        tasaCambio,
+        metodoPago,
+        referencia || null,
+        fechaPago || null,
       ]
     );
 
-    /*
-      7. Crear las seis cuotas mensuales pendientes del período.
-      No se crean seis pagos falsos; se crean obligaciones reales.
-    */
-    const fechaInicio = new Date();
-    const mesInicio = fechaInicio.getMonth() + 1;
-    const anoInicio = fechaInicio.getFullYear();
+    const mensualidadesCreadas =
+      await crearMensualidadesDelIntento(client, {
+        estudianteId,
+        intentoId: intento.id,
+        periodoId,
+        montoMensualidad,
+      });
 
-    for (let indice = 0; indice < 6; indice++) {
-      const fechaVencimiento = new Date(
-        anoInicio,
-        mesInicio - 1 + indice,
-        1
-      );
-
-      const mesCuota = fechaVencimiento.getMonth() + 1;
-      const anoCuota = fechaVencimiento.getFullYear();
-
-      await client.query(
-        `
-          INSERT INTO cuotas (
-            estudiante_id,
-            periodo_id,
-            concepto,
-            monto,
-            fecha_vencimiento,
-            estado,
-            mes,
-            ano
-          )
-          VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            'pendiente',
-            $6,
-            $7
-          )
-        `,
-        [
-          estudianteId,
-          periodoId,
-          `Mensualidad ${indice + 1} - Período ${periodoId}`,
-          montoMensualidad,
-          fechaVencimiento.toISOString().slice(0, 10),
-          mesCuota,
-          anoCuota,
-        ]
+    if (mensualidadesCreadas !== 6) {
+      throw new Error(
+        'El intento nuevo no recibió exactamente seis mensualidades.'
       );
     }
 
-    await client.query('COMMIT');
+    const vinculoInscripcion = await client.query(
+      `
+        INSERT INTO pagos_cuotas (
+          pago_id, cuota_id, intento_id, estudiante_id,
+          monto_cuota, estado
+        )
+        SELECT
+          p.id, c.id, p.intento_id, p.estudiante_id,
+          c.monto, 'reservada'
+        FROM pagos p
+        JOIN cuotas c
+          ON c.estudiante_id = p.estudiante_id
+        AND c.intento_id = p.intento_id
+        AND c.tipo_cuota = 'inscripcion'
+        WHERE p.id = $1::uuid
+          AND p.estudiante_id = $2::uuid
+          AND p.intento_id = $3::uuid
+      `,
+      [pagoResult.rows[0].id, estudianteId, intento.id]
+    );
 
-    await pool.query(
+    if (vinculoInscripcion.rowCount !== 1) {
+      throw new Error('No se pudo vincular el comprobante a la cuota de inscripcion.');
+    }
+
+
+    await client.query(
       `
         INSERT INTO auditoria (
           tabla_afectada,
@@ -544,44 +789,95 @@ export async function POST(request: NextRequest) {
         VALUES ('estudiantes', 'INSERT', $1, $2)
       `,
       [
-        actor.userId ?? null,
+        actor.userId,
         JSON.stringify({
-          estudiante,
+          estudiante_id: estudianteId,
+          intento_id: intento.id,
           periodo_id: periodoId,
-          materias_inscritas: materiasInscritas,
-          cuotas_generadas: 7,
+          numero_intento: 1,
+          ano_escolar: anoEscolar,
+          materias_inscritas: materiasAInscribir.length,
+          complementarias_inscritas: complementariasAInscribir,
+          cuota_inscripcion_generada: true,
+          mensualidades_generadas: mensualidadesCreadas,
+          pago_inscripcion_id: pagoResult.rows[0].id,
           resumen:
-            'Estudiante inscrito. Se generó una inscripción y seis mensualidades pendientes.',
+            'Alta inicial: primer intento, inscripción única ' +
+            'y seis mensualidades.',
         }),
       ]
     );
+
+    await client.query('COMMIT');
+    transaccionAbierta = false;
 
     return NextResponse.json(
       {
         success: true,
         message:
-          'Estudiante registrado. Se generó el pago de inscripción en verificación y seis mensualidades pendientes.',
+          'Estudiante registrado con su primer intento, ' +
+          'una inscripción y seis mensualidades.',
         estudiante,
-        materias_inscritas: materiasInscritas,
+        intento,
+        materias_inscritas: materiasAInscribir.length,
+        complementarias_inscritas: complementariasAInscribir,
         cuotas_generadas: 7,
+        mensualidades_generadas: mensualidadesCreadas,
       },
       { status: 201 }
     );
-  } catch (error) {
-    await client.query('ROLLBACK');
+  } catch (error: unknown) {
+    if (client && transaccionAbierta) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Error al revertir alta:', rollbackError);
+      }
+    }
+
+    if (error instanceof ErrorAlta) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status }
+      );
+    }
+
+    const codigo =
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error
+        ? String(error.code)
+        : '';
 
     console.error('Error POST estudiantes:', error);
+
+    if (codigo === '23505') {
+      return NextResponse.json(
+        {
+          error:
+            'Ya existe un registro con uno de los valores únicos enviados, ' +
+            'como la cédula o la cédula escolar.',
+        },
+        { status: 409 }
+      );
+    }
+
+    if (codigo === '22007' || codigo === '22008') {
+      return NextResponse.json(
+        { error: 'Alguna de las fechas ingresadas no es válida.' },
+        { status: 400 }
+      );
+    }
 
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? `Error al registrar: ${error.message}`
-            : 'Error al registrar estudiante.',
+          'No se pudo completar la inscripción. ' +
+          'Revise la terminal del servidor.',
       },
       { status: 500 }
     );
   } finally {
-    client.release();
+    client?.release();
   }
 }

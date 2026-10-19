@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
 import { verifyToken } from '@/lib/auth';
+import { tipoEvaluacionMateria } from '@/lib/evaluacionMaterias';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -67,7 +68,14 @@ export async function GET(request: NextRequest) {
 
     const result = await pool.query(query, values);
 
-    return NextResponse.json({ asignaciones: result.rows });
+    return NextResponse.json({
+    asignaciones: result.rows.map((asignacion) => ({
+      ...asignacion,
+      tipo_evaluacion: tipoEvaluacionMateria(
+        asignacion.materia_nombre || asignacion.materia
+      ),
+      })),
+    });
   } catch (error) {
     console.error('Error GET asignaciones:', error);
     return NextResponse.json(

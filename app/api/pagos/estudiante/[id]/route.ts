@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
 import { verifyToken } from '@/lib/auth';
+import { obtenerResumenFinanciero } from '@/lib/estadoFinanciero';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -13,27 +14,50 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const actor = verifyToken(
+    request.cookies.get('token')?.value ?? ''
+  );
+
+  if (!actor) {
+    return NextResponse.json(
+      { error: 'No autorizado.' },
+      { status: 401 }
+    );
+  }
+
+  if (!['director', 'secretaria'].includes(actor.rol)) {
+    return NextResponse.json(
+      { error: 'No tiene permisos para consultar pagos.' },
+      { status: 403 }
+    );
+  }
+
+  const { id: estudianteId } = await params;
+
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      estudianteId
+    )
+  ) {
+    return NextResponse.json(
+      { error: 'Identificador de estudiante inválido.' },
+      { status: 400 }
+    );
+  }
+
+  let client: import('pg').PoolClient | undefined;
+  let transaccionAbierta = false;
+
   try {
-    const token = request.cookies.get('token')?.value ?? '';
-    const actor = verifyToken(token);
+    client = await pool.connect();
 
-    if (!actor) {
-      return NextResponse.json(
-        { error: 'No autorizado.' },
-        { status: 401 }
-      );
-    }
+    // Todas las lecturas pertenecen a una misma instantánea.
+    await client.query(
+      'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'
+    );
+    transaccionAbierta = true;
 
-    if (!['director', 'secretaria'].includes(actor.rol)) {
-      return NextResponse.json(
-        { error: 'No tiene permisos para consultar pagos.' },
-        { status: 403 }
-      );
-    }
-
-    const { id: estudianteId } = await params;
-
-    const estudianteResult = await pool.query(
+    const estudianteResult = await client.query(
       `
         SELECT
           id,
@@ -41,14 +65,18 @@ export async function GET(
           apellidos,
           cedula,
           estado,
+          activo,
           periodo_id
         FROM estudiantes
-        WHERE id = $1
+        WHERE id = $1::uuid
       `,
       [estudianteId]
     );
 
     if (estudianteResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      transaccionAbierta = false;
+
       return NextResponse.json(
         { error: 'Estudiante no encontrado.' },
         { status: 404 }
@@ -56,90 +84,118 @@ export async function GET(
     }
 
     const estudiante = estudianteResult.rows[0];
-    const periodoActual = estudiante.periodo_id;
 
-    if (periodoActual === null || periodoActual === undefined) {
+    const intentoResult = await client.query(
+      `
+        SELECT
+          id,
+          estudiante_id,
+          periodo_id,
+          numero_intento,
+          ano_escolar,
+          estado,
+          fecha_inicio
+        FROM intentos_academicos
+        WHERE estudiante_id = $1::uuid
+          AND estado = 'en_curso'
+      `,
+      [estudianteId]
+    );
+
+    if (intentoResult.rows.length !== 1) {
+      await client.query('ROLLBACK');
+      transaccionAbierta = false;
+
       return NextResponse.json(
-        { error: 'El estudiante no tiene un período asignado.' },
-        { status: 400 }
+        {
+          error:
+            'El estudiante no tiene un intento académico abierto. ' +
+            'Esta ficha muestra únicamente el intento actual.',
+        },
+        { status: 409 }
       );
     }
 
-    const [pagosResult, resumenResult] = await Promise.all([
-      pool.query(
-        `
-          SELECT
-            id,
-            estudiante_id,
-            tipo,
-            concepto,
-            monto,
-            monto_bs,
-            metodo_pago,
-            referencia,
-            fecha_pago,
-            estado,
-            observaciones,
-            periodo_id,
-            created_at
-          FROM pagos
-          WHERE estudiante_id = $1
-            AND periodo_id = $2
-          ORDER BY created_at DESC, id DESC
-        `,
-        [estudianteId, periodoActual]
-      ),
+    const intento = intentoResult.rows[0];
 
-      pool.query(
-        `
-          SELECT
-            COALESCE(
-              (
-                SELECT SUM(p.monto)
-                FROM pagos p
-                WHERE p.estudiante_id = $1
-                  AND p.periodo_id = $2
-                  AND p.estado = 'confirmado'
-              ),
-              0
-            ) AS total_pagado,
+    if (
+      Number(estudiante.periodo_id) !== Number(intento.periodo_id)
+    ) {
+      await client.query('ROLLBACK');
+      transaccionAbierta = false;
 
-            COALESCE(
-              (
-                SELECT SUM(c.monto)
-                FROM cuotas c
-                WHERE c.estudiante_id = $1
-                  AND c.periodo_id = $2
-                  AND c.estado IN ('pendiente', 'vencida')
-              ),
-              0
-            ) AS deuda_total,
+      return NextResponse.json(
+        {
+          error:
+            'El período del estudiante no coincide con su intento abierto.',
+        },
+        { status: 409 }
+      );
+    }
 
-            (
-              SELECT COUNT(*)
-              FROM cuotas c
-              WHERE c.estudiante_id = $1
-                AND c.periodo_id = $2
-                AND c.estado IN ('pendiente', 'vencida')
-            ) AS cuotas_pendientes
-        `,
-        [estudianteId, periodoActual]
-      ),
-    ]);
+    const pagosResult = await client.query(
+      `
+        SELECT *
+        FROM pagos
+        WHERE estudiante_id = $1::uuid
+          AND intento_id = $2::uuid
+        ORDER BY created_at DESC, id DESC
+      `,
+      [estudianteId, intento.id]
+    );
 
-    const resumen = resumenResult.rows[0];
+    const cuotasResult = await client.query(
+      `
+        SELECT
+          c.*,
+          EXISTS (
+            SELECT 1
+            FROM pagos_cuotas pc
+            WHERE pc.cuota_id = c.id
+              AND pc.estado = 'reservada'
+          ) AS pago_en_verificacion
+        FROM cuotas c
+        WHERE c.estudiante_id = $1::uuid
+          AND c.intento_id = $2::uuid
+        ORDER BY
+          CASE
+            WHEN c.tipo_cuota = 'inscripcion' THEN 0
+            WHEN c.tipo_cuota = 'mensualidad' THEN 1
+            ELSE 2
+          END,
+          c.numero_mensualidad NULLS FIRST,
+          c.fecha_vencimiento,
+          c.id
+      `,
+      [estudianteId, intento.id]
+    );
+
+
+    const resumen = await obtenerResumenFinanciero(
+      client,
+      estudianteId,
+      intento.id
+    );
+
+    await client.query('COMMIT');
+    transaccionAbierta = false;
 
     return NextResponse.json(
       {
-        estudiante,
+        estudiante: {
+          ...estudiante,
+          estado: resumen.estado,
+          intento_id: intento.id,
+          numero_intento: intento.numero_intento,
+        },
+        intento,
         pagos: pagosResult.rows,
+        cuotas: cuotasResult.rows,
         resumen: {
-          periodo_id: periodoActual,
-          total_pagado: Number(resumen?.total_pagado ?? 0),
-          deuda_total: Number(resumen?.deuda_total ?? 0),
-          cuotas_pendientes: Number(
-            resumen?.cuotas_pendientes ?? 0
-          ),
+          ...resumen,
+          intento_id: intento.id,
+          periodo_id: intento.periodo_id,
+          numero_intento: intento.numero_intento,
         },
       },
       {
@@ -149,11 +205,21 @@ export async function GET(
       }
     );
   } catch (error) {
+    if (client && transaccionAbierta) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Error revirtiendo lectura financiera:', rollbackError);
+      }
+    }
+
     console.error('Error GET pagos del estudiante:', error);
 
     return NextResponse.json(
-      { error: 'No se pudo cargar el historial de pagos.' },
+      { error: 'No se pudo cargar la ficha financiera.' },
       { status: 500 }
     );
+  } finally {
+    client?.release();
   }
 }

@@ -1,6 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
 import { verifyToken } from '@/lib/auth';
+import {
+  ErrorTutoria,
+  procesarResultadoTutoria,
+} from '@/lib/tutoriasAcademicas';
+import {
+  tipoEvaluacionMateria,
+  validarResultadoMateria,
+} from '@/lib/evaluacionMaterias';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -50,7 +61,15 @@ export async function GET(request: NextRequest) {
         m.nombre AS materia,
         m.codigo AS materia_codigo,
         d.apellidos || ' ' || d.nombres AS docente,
-        c.nota,
+        c.nota AS nota_original,
+        COALESCE(
+          recuperacion.nota_final,
+          c.nota
+        ) AS nota,
+        (
+          recuperacion.id IS NOT NULL
+        ) AS recuperada_por_tutoria,
+        c.resultado_cualitativo,
         a.periodo_id,
         p.nombre as periodo_nombre,
         c.observaciones,
@@ -61,6 +80,10 @@ export async function GET(request: NextRequest) {
       JOIN docentes d ON c.docente_id = d.id
       JOIN asignaciones_docentes a ON c.asignacion_id = a.id
       JOIN periodos p ON a.periodo_id = p.numero
+      LEFT JOIN tutorias_academicas recuperacion
+        ON recuperacion.inscripcion_origen_id =
+          c.inscripcion_id
+      AND recuperacion.estado = 'aprobada'
       WHERE ${whereClause}
       ORDER BY a.periodo_id, e.apellidos, e.nombres, m.nombre`,
       values
@@ -71,6 +94,7 @@ export async function GET(request: NextRequest) {
       FROM calificaciones c
       JOIN asignaciones_docentes a ON c.asignacion_id = a.id
       JOIN periodos p ON a.periodo_id = p.numero
+
       WHERE ${whereClause}
       GROUP BY a.periodo_id, p.nombre
       ORDER BY a.periodo_id`,
@@ -78,7 +102,10 @@ export async function GET(request: NextRequest) {
     );
 
     return NextResponse.json({
-      calificaciones: calificacionesResult.rows,
+      calificaciones: calificacionesResult.rows.map((fila) => ({
+          ...fila,
+          tipo_evaluacion: tipoEvaluacionMateria(fila.materia),
+        })),
       stats: statsResult.rows.map((row) => ({
         periodo_id: row.periodo_id,
         periodo_nombre: row.nombre,
@@ -97,7 +124,16 @@ async function validarAsignacionParaActor(
   actor: { rol: string; docenteId?: string }
 ): Promise<{ ok: true; asignacion: any } | { ok: false; response: NextResponse }> {
   const asigRes = await client.query(
-    'SELECT docente_id, materia_id, periodo_id FROM asignaciones_docentes WHERE id = $1',
+    `
+      SELECT
+        a.docente_id,
+        a.materia_id,
+        a.periodo_id,
+        m.nombre AS materia_nombre
+      FROM asignaciones_docentes a
+      JOIN materias m ON m.id = a.materia_id
+      WHERE a.id = $1
+    `,
     [asignacionId]
   );
 
@@ -130,220 +166,647 @@ async function estudianteInscrito(client: any, estudianteId: string, materiaId: 
 }
 
 export async function POST(request: NextRequest) {
-  const token = request.cookies.get('token')?.value ?? '';
-  const actor = verifyToken(token);
+  const actor = verifyToken(
+    request.cookies.get('token')?.value ?? ''
+  );
+
   if (!actor) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+    return NextResponse.json(
+      { error: 'No autorizado.' },
+      { status: 401 }
+    );
   }
 
-  if (actor.rol === 'docente' && !actor.docenteId) {
-    return NextResponse.json({ error: 'Perfil de docente no vinculado' }, { status: 403 });
+  if (
+    !['director', 'secretaria', 'docente'].includes(
+      actor.rol
+    )
+  ) {
+    return NextResponse.json(
+      { error: 'No tiene permisos para registrar calificaciones.' },
+      { status: 403 }
+    );
   }
 
-  const body = await request.json();
+  if (
+    actor.rol === 'docente' &&
+    !actor.docenteId
+  ) {
+    return NextResponse.json(
+      { error: 'El usuario no tiene un perfil docente vinculado.' },
+      { status: 403 }
+    );
+  }
 
-  // ═══════════════════════════════════════════════════════════════
-  // INICIO — CARGA MASIVA
-  // ═══════════════════════════════════════════════════════════════
-  if (body.calificaciones && Array.isArray(body.calificaciones)) {
-    const { asignacion_id, calificaciones } = body;
+  class ErrorCalificacion extends Error {
+    constructor(
+      public status: number,
+      message: string
+    ) {
+      super(message);
+    }
+  }
 
-    if (!asignacion_id || calificaciones.length === 0) {
-      return NextResponse.json(
-        { error: 'Faltan datos para carga masiva (asignacion_id y calificaciones)' },
-        { status: 400 }
+  const esUuid = (
+    valor: unknown
+  ): valor is string =>
+    typeof valor === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      valor
+    );
+
+  interface EntradaCalificacion {
+    estudiante_id: string;
+    inscripcion_id?: string;
+    nota: unknown;
+    resultado_cualitativo: unknown;
+    observaciones: string;
+  }
+
+  let client: import('pg').PoolClient | undefined;
+  let transaccionAbierta = false;
+
+  try {
+    let recibido: unknown;
+
+    try {
+      recibido = await request.json();
+    } catch {
+      throw new ErrorCalificacion(
+        400,
+        'La solicitud no contiene un JSON válido.'
       );
     }
 
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
+    if (
+      typeof recibido !== 'object' ||
+      recibido === null ||
+      Array.isArray(recibido)
+    ) {
+      throw new ErrorCalificacion(
+        400,
+        'La solicitud no tiene un formato válido.'
+      );
+    }
 
-      const validacion = await validarAsignacionParaActor(client, asignacion_id, actor);
-      if (!validacion.ok) {
-        await client.query('ROLLBACK');
-        return validacion.response;
-      }
-      const { docente_id, materia_id, periodo_id } = validacion.asignacion;
+    const body = recibido as Record<string, unknown>;
 
-      const resultados: any[] = [];
-      const errores: any[] = [];
+    if (!esUuid(body.asignacion_id)) {
+      throw new ErrorCalificacion(
+        400,
+        'Seleccione una asignación válida.'
+      );
+    }
 
-      for (const item of calificaciones) {
-        const { estudiante_id, nota, observaciones } = item;
+    const asignacionId =
+      body.asignacion_id.toLowerCase();
 
-        if (!estudiante_id || nota === undefined || nota === '') {
-          errores.push({ estudiante_id, error: 'Faltan datos obligatorios' });
-          continue;
+    // Se mantienen ambos formatos:
+    // carga de un grupo y carga individual.
+    const entradasRecibidas: unknown[] =
+      body.calificaciones === undefined
+        ? [body]
+        : Array.isArray(body.calificaciones)
+          ? body.calificaciones
+          : [];
+
+    if (
+      entradasRecibidas.length === 0 ||
+      entradasRecibidas.length > 300
+    ) {
+      throw new ErrorCalificacion(
+        400,
+        'La solicitud debe contener entre 1 y 300 calificaciones.'
+      );
+    }
+
+    const entradas: EntradaCalificacion[] =
+      entradasRecibidas.map((entrada) => {
+        if (
+          typeof entrada !== 'object' ||
+          entrada === null ||
+          Array.isArray(entrada)
+        ) {
+          throw new ErrorCalificacion(
+            400,
+            'Existe una calificación con formato inválido.'
+          );
         }
 
-        const notaNum = parseFloat(nota);
-        if (Number.isNaN(notaNum) || notaNum < 1 || notaNum > 5) {
-        errores.push({
-          estudiante_id,
-          error: 'Nota inválida. Debe estar entre 1.00 y 5.00.',
-        });
-        continue;
+        const item =
+          entrada as Record<string, unknown>;
+
+        if (!esUuid(item.estudiante_id)) {
+          throw new ErrorCalificacion(
+            400,
+            'Existe un identificador de estudiante inválido.'
+          );
         }
 
-        const inscrito = await estudianteInscrito(client, estudiante_id, materia_id, periodo_id);
-        if (!inscrito) {
-          errores.push({ estudiante_id, error: 'El estudiante no está inscrito en esta materia/periodo' });
-          continue;
+        if (
+          item.inscripcion_id !== undefined &&
+          !esUuid(item.inscripcion_id)
+        ) {
+          throw new ErrorCalificacion(
+            400,
+            'Existe un identificador de inscripción inválido.'
+          );
         }
 
-        const existing = await client.query(
-          `SELECT c.id FROM calificaciones c
-           JOIN asignaciones_docentes a ON c.asignacion_id = a.id
-           WHERE c.estudiante_id = $1 AND c.materia_id = $2 AND c.docente_id = $3 AND a.periodo_id = $4`,
-          [estudiante_id, materia_id, docente_id, periodo_id]
+        if (
+          item.observaciones != null &&
+          typeof item.observaciones !== 'string'
+        ) {
+          throw new ErrorCalificacion(
+            400,
+            'Las observaciones deben ser texto.'
+          );
+        }
+
+        return {
+          estudiante_id:
+            item.estudiante_id.toLowerCase(),
+
+          inscripcion_id:
+            typeof item.inscripcion_id === 'string'
+              ? item.inscripcion_id.toLowerCase()
+              : undefined,
+
+          nota: item.nota,
+
+          resultado_cualitativo:
+            item.resultado_cualitativo,
+
+          observaciones:
+            typeof item.observaciones === 'string'
+              ? item.observaciones
+              : '',
+        };
+      });
+
+    client = await pool.connect();
+
+    await client.query('BEGIN');
+    transaccionAbierta = true;
+
+    await client.query(
+      "SET LOCAL TIME ZONE 'America/Caracas'"
+    );
+
+    // Bloquear alumnos en un orden estable.
+    const estudiantesIds = Array.from(
+      new Set(
+        entradas.map(
+          (entrada) => entrada.estudiante_id
+        )
+      )
+    ).sort();
+
+    const estudiantesResult = await client.query(
+      `
+        SELECT id, activo, periodo_id
+        FROM estudiantes
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id
+        FOR UPDATE
+      `,
+      [estudiantesIds]
+    );
+
+    if (
+      estudiantesResult.rows.length !==
+      estudiantesIds.length
+    ) {
+      throw new ErrorCalificacion(
+        404,
+        'Uno o más estudiantes no existen.'
+      );
+    }
+
+    if (
+      estudiantesResult.rows.some(
+        (estudiante) =>
+          estudiante.activo !== true
+      )
+    ) {
+      throw new ErrorCalificacion(
+        409,
+        'No se pueden cargar notas a estudiantes inactivos.'
+      );
+    }
+
+    const asignacionResult = await client.query(
+      `
+        SELECT
+          a.id,
+          a.docente_id,
+          a.materia_id,
+          a.periodo_id,
+          a.ano_escolar,
+          a.activa,
+          d.activo AS docente_activo,
+          m.nombre AS materia_nombre,
+          m.activa AS materia_activa
+        FROM asignaciones_docentes a
+        JOIN docentes d
+          ON d.id = a.docente_id
+        JOIN materias m
+          ON m.id = a.materia_id
+        WHERE a.id = $1::uuid
+        FOR SHARE OF a, d, m
+      `,
+      [asignacionId]
+    );
+
+    if (asignacionResult.rows.length !== 1) {
+      throw new ErrorCalificacion(
+        404,
+        'La asignación no existe o está incompleta.'
+      );
+    }
+
+    const asignacion =
+      asignacionResult.rows[0];
+
+    if (
+      asignacion.activa !== true ||
+      asignacion.docente_activo !== true ||
+      asignacion.materia_activa !== true
+    ) {
+      throw new ErrorCalificacion(
+        409,
+        'La asignación, el profesor y la materia deben estar activos.'
+      );
+    }
+
+    if (
+      actor.rol === 'docente' &&
+      asignacion.docente_id !==
+        actor.docenteId?.toLowerCase()
+    ) {
+      throw new ErrorCalificacion(
+        403,
+        'No puede calificar una asignación de otro docente.'
+      );
+    }
+
+    const inscripcionesProcesadas =
+      new Set<string>();
+
+    const resultados = [];
+
+    for (const entrada of entradas) {
+      const resultadoValidado =
+        validarResultadoMateria(
+          asignacion.materia_nombre,
+          entrada.nota,
+          entrada.resultado_cualitativo
         );
 
-        let row: any;
-        if (existing.rows.length > 0) {
-          const upd = await client.query(
-            `UPDATE calificaciones
-             SET nota = $1, observaciones = $2, fecha_cierre = CURRENT_TIMESTAMP
-             WHERE id = $3 RETURNING *`,
-            [notaNum, observaciones || null, existing.rows[0].id]
-          );
-          row = upd.rows[0];
-        } else {
-          const ins = await client.query(
-            `INSERT INTO calificaciones (estudiante_id, materia_id, docente_id, asignacion_id, nota, observaciones)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-            [estudiante_id, materia_id, docente_id, asignacion_id, notaNum, observaciones || null]
-          );
-          row = ins.rows[0];
-        }
+      if (!resultadoValidado.ok) {
+        throw new ErrorCalificacion(
+          400,
+          `Estudiante ${entrada.estudiante_id}: ` +
+            resultadoValidado.error
+        );
+      }
 
-        const [est, mat, doc] = await Promise.all([
-          client.query('SELECT nombres, apellidos FROM estudiantes WHERE id = $1', [estudiante_id]),
-          client.query('SELECT nombre FROM materias WHERE id = $1', [materia_id]),
-          client.query('SELECT nombres, apellidos FROM docentes WHERE id = $1', [docente_id]),
-        ]);
-        const estudianteNombre = `${est.rows[0]?.apellidos || ''} ${est.rows[0]?.nombres || ''}`.trim();
-        const materiaNombre = mat.rows[0]?.nombre;
-        const docenteNombre = `${doc.rows[0]?.apellidos || ''} ${doc.rows[0]?.nombres || ''}`.trim();
-
+      const inscripcionResult =
         await client.query(
-          `INSERT INTO auditoria (tabla_afectada, accion, usuario_id, datos_nuevos)
-           VALUES ('calificaciones','INSERT',$1,$2)`,
+          `
+            SELECT
+              im.id,
+              im.estudiante_id,
+              im.materia_id,
+              im.periodo_id,
+              im.intento_id,
+              im.tipo_inscripcion,
+              im.tutoria_id,
+              ia.numero_intento
+            FROM inscripciones_materias im
+            JOIN intentos_academicos ia
+              ON ia.id = im.intento_id
+            WHERE im.estudiante_id = $1::uuid
+              AND im.materia_id = $2::uuid
+              AND im.periodo_id = $3::integer
+              AND im.ano_escolar = $4::varchar
+              AND ia.ano_escolar = $4::varchar
+              AND ia.estado = 'en_curso'
+              AND im.activa = true
+              AND (
+                $5::uuid IS NULL
+                OR im.id = $5::uuid
+              )
+            FOR UPDATE OF im, ia
+          `,
           [
-            actor.userId,
-            JSON.stringify({
-              ...row,
-              estudiante_nombre: estudianteNombre,
-              materia_nombre: materiaNombre,
-              docente_nombre: docenteNombre,
-              resumen: `Nota ${notaNum.toFixed(2)}/5 a ${estudianteNombre} en ${materiaNombre} (carga masiva)`,
-            }),
+            entrada.estudiante_id,
+            asignacion.materia_id,
+            asignacion.periodo_id,
+            asignacion.ano_escolar,
+            entrada.inscripcion_id ?? null,
           ]
         );
 
-        resultados.push(row);
+      if (inscripcionResult.rows.length === 0) {
+        throw new ErrorCalificacion(
+          409,
+          'No existe una inscripción activa del intento abierto ' +
+            'compatible con esta materia, período y año escolar. ' +
+            `Estudiante: ${entrada.estudiante_id}.`
+        );
       }
 
-      await client.query('COMMIT');
-      return NextResponse.json({
-        success: true,
-        guardadas: resultados.length,
-        errores: errores.length > 0 ? errores : undefined,
-        calificaciones: resultados,
-      });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      console.error('Error POST bulk calificaciones:', error);
-      return NextResponse.json({ error: (error as Error).message }, { status: 500 });
-    } finally {
-      client.release();
-    }
-  }
-  // ═══════════════════════════════════════════════════════════════
-  // FIN — CARGA MASIVA
-  // ═══════════════════════════════════════════════════════════════
+      if (inscripcionResult.rows.length > 1) {
+        throw new ErrorCalificacion(
+          409,
+          'El estudiante tiene varias inscripciones compatibles. ' +
+            'Debe enviarse inscripcion_id para distinguir la materia regular de la tutoría.'
+        );
+      }
 
-  // ── FLUJO INDIVIDUAL ──
-  const client = await pool.connect();
-  try {
-    const { estudiante_id, materia_id, docente_id, asignacion_id, nota, observaciones } = body;
+      const inscripcion =
+        inscripcionResult.rows[0];
 
-    if (!estudiante_id || !materia_id || !docente_id || !asignacion_id || nota === undefined) {
-      return NextResponse.json({ error: 'Faltan datos obligatorios' }, { status: 400 });
-    }
+      const estudiante =
+        estudiantesResult.rows.find(
+          (fila) =>
+            fila.id === entrada.estudiante_id
+        );
 
-    const validacion = await validarAsignacionParaActor(client, asignacion_id, actor);
-    if (!validacion.ok) {
-      return validacion.response;
-    }
-    const asignacion = validacion.asignacion;
+      if (
+        !estudiante ||
+        Number(estudiante.periodo_id) !==
+          Number(inscripcion.periodo_id)
+      ) {
+        throw new ErrorCalificacion(
+          409,
+          'El período del estudiante no coincide con la inscripción.'
+        );
+      }
 
-    const notaNum = parseFloat(nota);
-    if (Number.isNaN(notaNum) || notaNum < 1 || notaNum > 5) {
-      return NextResponse.json(
-        { error: 'Nota inválida. Debe estar entre 1.00 y 5.00.' },
-        { status: 400 }
+      
+
+      if (
+        inscripcionesProcesadas.has(
+          inscripcion.id
+        )
+      ) {
+        throw new ErrorCalificacion(
+          400,
+          'La misma inscripción aparece más de una vez en la solicitud.'
+        );
+      }
+
+      inscripcionesProcesadas.add(
+        inscripcion.id
       );
-    }
 
-    const inscrito = await estudianteInscrito(client, estudiante_id, asignacion.materia_id, asignacion.periodo_id);
-    if (!inscrito) {
-      return NextResponse.json(
-        { error: 'El estudiante no está inscrito en esta materia/periodo' },
-        { status: 400 }
+      const existenteResult =
+        await client.query(
+          `
+            SELECT *
+            FROM calificaciones
+            WHERE inscripcion_id = $1::uuid
+            FOR UPDATE
+          `,
+          [inscripcion.id]
+        );
+
+      const existente =
+        existenteResult.rows[0];
+
+      if (
+        existente &&
+        actor.rol === 'docente' &&
+        existente.docente_id !==
+          asignacion.docente_id
+      ) {
+        throw new ErrorCalificacion(
+          403,
+          'La inscripción ya tiene una nota registrada por otro docente. ' +
+            'La corrección debe revisarla administración.'
+        );
+      }
+
+      const mismoResultado =
+        existente &&
+        (
+          existente.nota == null
+            ? resultadoValidado.nota === null
+            : resultadoValidado.nota !== null &&
+              Number(existente.nota) ===
+                resultadoValidado.nota
+        ) &&
+        (existente.resultado_cualitativo ?? null) ===
+          resultadoValidado.resultado_cualitativo &&
+        (existente.observaciones ?? '') ===
+          entrada.observaciones;
+
+      if (mismoResultado) {
+        resultados.push(existente);
+        continue;
+      }
+
+      const resultadoTutoria =
+        inscripcion.tipo_inscripcion === 'tutoria'
+          ? await procesarResultadoTutoria(
+              client,
+              {
+                inscripcionId: inscripcion.id,
+                estudianteId:
+                  entrada.estudiante_id,
+                nota: resultadoValidado.nota,
+                usuarioId: actor.userId,
+              }
+            )
+          : null;
+
+      const guardadoResult =
+        await client.query(
+          `
+            INSERT INTO calificaciones (
+              estudiante_id,
+              materia_id,
+              docente_id,
+              asignacion_id,
+              intento_id,
+              inscripcion_id,
+              nota,
+              resultado_cualitativo,
+              observaciones
+            )
+            VALUES (
+              $1::uuid,
+              $2::uuid,
+              $3::uuid,
+              $4::uuid,
+              $5::uuid,
+              $6::uuid,
+              $7::numeric,
+              $8::varchar,
+              $9::text
+            )
+            ON CONFLICT (inscripcion_id)
+            DO UPDATE SET
+              docente_id = EXCLUDED.docente_id,
+              asignacion_id = EXCLUDED.asignacion_id,
+              nota = EXCLUDED.nota,
+              resultado_cualitativo =
+                EXCLUDED.resultado_cualitativo,
+              observaciones = EXCLUDED.observaciones,
+              fecha_cierre = CURRENT_TIMESTAMP
+            RETURNING *
+          `,
+          [
+            entrada.estudiante_id,
+            asignacion.materia_id,
+            asignacion.docente_id,
+            asignacionId,
+            inscripcion.intento_id,
+            inscripcion.id,
+            resultadoValidado.nota,
+            resultadoValidado.resultado_cualitativo,
+            entrada.observaciones || null,
+          ]
+        );
+
+      const guardada =
+        guardadoResult.rows[0];
+
+      await client.query(
+        `
+          INSERT INTO evaluaciones_academicas (
+            inscripcion_id,
+            asignacion_id,
+            nota,
+            resultado_cualitativo,
+            observaciones,
+            tipo_registro,
+            usuario_id
+          )
+          VALUES (
+            $1::uuid,
+            $2::uuid,
+            $3::numeric,
+            $4::varchar,
+            $5::text,
+            $6::varchar,
+            $7::text
+          )
+        `,
+        [
+          inscripcion.id,
+          asignacionId,
+          resultadoValidado.nota,
+          resultadoValidado.resultado_cualitativo,
+          entrada.observaciones || null,
+          existente ? 'correccion' : 'carga',
+          actor.userId,
+        ]
       );
-    }
 
-    const existing = await client.query(
-      `SELECT c.id FROM calificaciones c
-       JOIN asignaciones_docentes a ON c.asignacion_id = a.id
-       WHERE c.estudiante_id = $1 AND c.materia_id = $2 AND c.docente_id = $3 AND a.periodo_id = $4`,
-      [estudiante_id, materia_id, docente_id, asignacion.periodo_id]
-    );
-
-    if (existing.rows.length > 0) {
-      return NextResponse.json(
-        { error: 'Ya existe una calificación para este estudiante en esta materia y periodo' },
-        { status: 400 }
+      await client.query(
+        `
+          INSERT INTO auditoria (
+            tabla_afectada,
+            accion,
+            usuario_id,
+            datos_nuevos
+          )
+          VALUES (
+            'calificaciones',
+            $1::varchar,
+            $2,
+            $3
+          )
+        `,
+        [
+          existente ? 'UPDATE' : 'INSERT',
+          actor.userId,
+          JSON.stringify({
+            ...guardada,
+            recuperacion: resultadoTutoria,
+            resultado_anterior:
+              existente
+                ? {
+                    nota: existente.nota,
+                    resultado_cualitativo:
+                      existente.resultado_cualitativo,
+                    docente_id:
+                      existente.docente_id,
+                    asignacion_id:
+                      existente.asignacion_id,
+                  }
+                : null,
+            numero_intento:
+              inscripcion.numero_intento,
+            tipo_evaluacion:
+              tipoEvaluacionMateria(
+                asignacion.materia_nombre
+              ),
+            resumen:
+              `Calificación ${resultadoValidado.texto} ` +
+              `registrada en su inscripción e intento.`,
+          }),
+        ]
       );
+
+      resultados.push(guardada);
     }
 
-    const result = await client.query(
-      `INSERT INTO calificaciones (estudiante_id, materia_id, docente_id, asignacion_id, nota, observaciones)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [estudiante_id, materia_id, docente_id, asignacion_id, notaNum, observaciones]
-    );
+    await client.query('COMMIT');
+    transaccionAbierta = false;
 
-    const [est, mat, doc] = await Promise.all([
-      client.query('SELECT nombres, apellidos FROM estudiantes WHERE id = $1', [estudiante_id]),
-      client.query('SELECT nombre FROM materias WHERE id = $1', [materia_id]),
-      client.query('SELECT nombres, apellidos FROM docentes WHERE id = $1', [docente_id]),
-    ]);
+    return NextResponse.json({
+      success: true,
+      guardadas: resultados.length,
+      calificaciones: resultados,
+      calificacion:
+        resultados.length === 1
+          ? resultados[0]
+          : undefined,
+    });
+  }   catch (error: unknown) {
+        if (client && transaccionAbierta) {
+          try {
+            await client.query('ROLLBACK');
+          } catch (rollbackError) {
+            console.error(
+              'Error revirtiendo calificaciones:',
+              rollbackError
+            );
+          }
+        }
 
-    const estudianteNombre = `${est.rows[0]?.apellidos || ''} ${est.rows[0]?.nombres || ''}`.trim();
-    const materiaNombre = mat.rows[0]?.nombre;
-    const docenteNombre = `${doc.rows[0]?.apellidos || ''} ${doc.rows[0]?.nombres || ''}`.trim();
+        if (error instanceof ErrorTutoria) {
+          return NextResponse.json(
+            { error: error.message },
+            { status: error.status }
+          );
+        }
 
-    await pool.query(
-      `INSERT INTO auditoria (tabla_afectada, accion, usuario_id, datos_nuevos)
-       VALUES ('calificaciones','INSERT',$1,$2)`,
-      [
-        actor.userId,
-        JSON.stringify({
-          ...result.rows[0],
-          estudiante_nombre: estudianteNombre,
-          materia_nombre: materiaNombre,
-          docente_nombre: docenteNombre,
-          resumen: `Nota ${notaNum.toFixed(2)}/5 a ${estudianteNombre} en ${materiaNombre}`,
-        }),
-      ]
-    );
+        if (error instanceof ErrorCalificacion) {
+          return NextResponse.json(
+            { error: error.message },
+            { status: error.status }
+          );
+        }
 
-    return NextResponse.json({ calificacion: result.rows[0] });
-  } catch (error) {
-    console.error('Error POST calificaciones:', error);
-    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
-  } finally {
-    client.release();
-  }
+        console.error(
+          'Error POST calificaciones por inscripción:',
+          error
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              'No se pudieron guardar las calificaciones. ' +
+              'Revise la terminal.',
+          },
+          { status: 500 }
+        );
+      } finally {
+        client?.release();
+      }
 }

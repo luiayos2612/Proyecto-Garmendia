@@ -1,17 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
+
 import { verifyToken } from '@/lib/auth';
+
+import {
+  ErrorCierreAcademico,
+  evaluarCierreAcademico,
+} from '@/lib/cierreAcademico';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const token = request.cookies.get('token')?.value ?? '';
-  const actor = verifyToken(token);
+  const actor = verifyToken(
+    request.cookies.get('token')?.value ?? ''
+  );
 
   if (!actor) {
     return NextResponse.json(
@@ -22,224 +32,156 @@ export async function POST(
 
   if (actor.rol !== 'director') {
     return NextResponse.json(
-      { error: 'Solo el director puede aprobar el siguiente período.' },
+      {
+        error:
+          'Solo el director puede preparar el cierre académico.',
+      },
       { status: 403 }
     );
   }
 
-  const { id: estudianteId } = await params;
-  const client = await pool.connect();
+  const { id: estudianteId } =
+    await params;
+
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      estudianteId
+    )
+  ) {
+    return NextResponse.json(
+      { error: 'Identificador de estudiante inválido.' },
+      { status: 400 }
+    );
+  }
+
+  let client:
+    import('pg').PoolClient | undefined;
+
+  let transaccionAbierta = false;
 
   try {
+    client = await pool.connect();
+
     await client.query('BEGIN');
+    transaccionAbierta = true;
 
-    const estudianteResult = await client.query(
-      `
-        SELECT
-          id,
-          nombres,
-          apellidos,
-          periodo_id,
-          activo,
-          estado
-        FROM estudiantes
-        WHERE id = $1
-        FOR UPDATE
-      `,
-      [estudianteId]
+    await client.query(
+      "SET LOCAL TIME ZONE 'America/Caracas'"
     );
 
-    if (estudianteResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-
-      return NextResponse.json(
-        { error: 'Estudiante no encontrado.' },
-        { status: 404 }
+    const evaluacion =
+      await evaluarCierreAcademico(
+        client,
+        estudianteId
       );
-    }
 
-    const estudiante = estudianteResult.rows[0];
-    const periodoActual = Number(estudiante.periodo_id);
-
-    if (!periodoActual) {
+    if (!evaluacion.puede_preparar) {
       await client.query('ROLLBACK');
-
-      return NextResponse.json(
-        { error: 'El estudiante no tiene un período académico asignado.' },
-        { status: 400 }
-      );
-    }
-
-    if (periodoActual >= 6) {
-      await client.query('ROLLBACK');
-
-      return NextResponse.json(
-        { error: 'El estudiante ya se encuentra en el último período.' },
-        { status: 400 }
-      );
-    }
-
-    const cupoExistente = await client.query(
-      `
-        SELECT id
-        FROM cupos
-        WHERE estudiante_id = $1
-          AND periodo_destino = $2
-          AND estado = 'pendiente'
-        LIMIT 1
-      `,
-      [estudianteId, periodoActual + 1]
-    );
-
-    if (cupoExistente.rows.length > 0) {
-      await client.query('ROLLBACK');
-
-      return NextResponse.json(
-        {
-          error: `Ya existe un cupo pendiente para el Período ${
-            periodoActual + 1
-          }.`,
-        },
-        { status: 400 }
-      );
-    }
-
-    /*
-      REGLA FINANCIERA ÚNICA:
-      aprobar solo cuando la deuda total sea cero.
-
-      Se calcula con cuotas pendientes o vencidas.
-      Los pagos individuales y la cantidad de mensualidades
-      NO intervienen en esta decisión.
-    */
-    const deudaResult = await client.query(
-      `
-        SELECT
-          COALESCE(
-            SUM(monto) FILTER (
-              WHERE estado IN ('pendiente', 'vencida')
-            ),
-            0
-          ) AS deuda_total
-        FROM cuotas
-        WHERE estudiante_id = $1
-      `,
-      [estudianteId]
-    );
-
-    const deudaTotal = Number(deudaResult.rows[0]?.deuda_total ?? 0);
-
-    if (deudaTotal > 0) {
-      await client.query('ROLLBACK');
-
-      return NextResponse.json(
-        {
-          error: `El estudiante posee una deuda pendiente de ${deudaTotal.toFixed(
-            2
-          )}. Debe estar solvente para aprobar el período.`,
-          requisitos: {
-            deuda_total: deudaTotal,
-          },
-        },
-        { status: 400 }
-      );
-    }
-
-    /*
-      REGLA ACADÉMICA:
-      todas las materias inscritas y activas del período actual
-      deben tener una nota >= 3.00.
-    */
-    const materiasPendientesResult = await client.query(
-      `
-        SELECT
-          m.nombre,
-          m.codigo,
-          c.nota
-        FROM inscripciones_materias im
-        INNER JOIN materias m
-          ON m.id = im.materia_id
-        LEFT JOIN calificaciones c
-          ON c.estudiante_id = im.estudiante_id
-          AND c.materia_id = im.materia_id
-          AND c.asignacion_id IN (
-            SELECT ad.id
-            FROM asignaciones_docentes ad
-            WHERE ad.periodo_id = im.periodo_id
-              AND ad.materia_id = im.materia_id
-          )
-        WHERE im.estudiante_id = $1
-          AND im.periodo_id = $2
-          AND im.activa = true
-          AND (c.nota IS NULL OR c.nota < 3)
-        ORDER BY m.nombre
-      `,
-      [estudianteId, periodoActual]
-    );
-
-    if (materiasPendientesResult.rows.length > 0) {
-      await client.query('ROLLBACK');
-
-      const materias = materiasPendientesResult.rows.map((materia) => ({
-        nombre: materia.nombre,
-        codigo: materia.codigo,
-        nota: materia.nota === null ? null : Number(materia.nota),
-      }));
+      transaccionAbierta = false;
 
       return NextResponse.json(
         {
           error:
-            'El estudiante debe tener nota mínima de 3.00 en todas las materias del período.',
-          requisitos: {
-            deuda_total: deudaTotal,
-            materias_pendientes: materias,
-          },
+            evaluacion.bloqueos.join(' '),
+          evaluacion,
         },
-        { status: 400 }
+        { status: 409 }
       );
     }
 
-    const promedioResult = await client.query(
-      `
-        SELECT COALESCE(ROUND(AVG(c.nota), 2), 0) AS promedio_general
-        FROM calificaciones c
-        INNER JOIN asignaciones_docentes ad
-          ON ad.id = c.asignacion_id
-        WHERE c.estudiante_id = $1
-          AND ad.periodo_id = $2
-      `,
-      [estudianteId, periodoActual]
-    );
+    const procesadoResult =
+      await client.query(
+        `
+          SELECT id
+          FROM cupos
+          WHERE intento_origen_id = $1::uuid
+            AND estado = 'aprobado'
+          LIMIT 1
+        `,
+        [evaluacion.intento_origen_id]
+      );
 
-    const promedioGeneral = Number(
-      promedioResult.rows[0]?.promedio_general ?? 0
-    );
+    if (procesadoResult.rows.length > 0) {
+      throw new ErrorCierreAcademico(
+        409,
+        'Este intento ya tiene una transición aprobada.'
+      );
+    }
 
-    const crearCupo = await client.query(
+    const descripciones = {
+      avance:
+        'Avance al siguiente período.',
+      avance_con_tutorias:
+        'Avance al siguiente período con tutorías.',
+      repeticion:
+        'Repetición del período actual.',
+      recuperacion_final:
+        'Continuidad en el período 6 para completar pendientes.',
+      culminacion:
+        'Cumple los requisitos para culminar los estudios.',
+    };
+
+    const observaciones =
+      descripciones[
+        evaluacion.tipo_transicion
+      ];
+
+    const cupoResult = await client.query(
       `
         INSERT INTO cupos (
           estudiante_id,
+          intento_origen_id,
           periodo_origen,
           periodo_destino,
+          tipo_transicion,
           estado,
           pagos_solvencia,
           materias_aprobadas,
           promedio_general,
           observaciones
         )
-        VALUES ($1, $2, $3, 'pendiente', true, true, $4, $5)
+        VALUES (
+          $1::uuid,
+          $2::uuid,
+          $3::integer,
+          $4::integer,
+          $5::varchar,
+          'pendiente',
+          true,
+          $6::boolean,
+          $7::numeric,
+          $8::text
+        )
+        ON CONFLICT (intento_origen_id)
+        WHERE estado = 'pendiente'
+        DO UPDATE SET
+          periodo_destino =
+            EXCLUDED.periodo_destino,
+          tipo_transicion =
+            EXCLUDED.tipo_transicion,
+          pagos_solvencia =
+            EXCLUDED.pagos_solvencia,
+          materias_aprobadas =
+            EXCLUDED.materias_aprobadas,
+          promedio_general =
+            EXCLUDED.promedio_general,
+          observaciones =
+            EXCLUDED.observaciones
         RETURNING *
       `,
       [
         estudianteId,
-        periodoActual,
-        periodoActual + 1,
-        promedioGeneral,
-        `Aprobado académica y financieramente. Deuda total: ${deudaTotal.toFixed(
-          2
-        )}.`,
+        evaluacion.intento_origen_id,
+        evaluacion.periodo_origen,
+        evaluacion.periodo_destino,
+        evaluacion.tipo_transicion,
+        evaluacion.materias_numericas_aprobadas,
+        evaluacion.promedio_general,
+        observaciones,
       ]
     );
+
+    const cupo = cupoResult.rows[0];
 
     await client.query(
       `
@@ -249,56 +191,82 @@ export async function POST(
           usuario_id,
           datos_nuevos
         )
-        VALUES ('cupos', 'INSERT', $1, $2)
+        VALUES (
+          'cupos',
+          'UPDATE',
+          $1,
+          $2
+        )
       `,
       [
         actor.userId,
         JSON.stringify({
-          cupo: crearCupo.rows[0],
-          estudiante_id: estudianteId,
-          periodo_origen: periodoActual,
-          periodo_destino: periodoActual + 1,
-          deuda_total: deudaTotal,
-          promedio_general: promedioGeneral,
-          regla_nota_minima: 3,
-          resumen: `Solicitud de cupo creada para Período ${
-            periodoActual + 1
-          }. Deuda total: ${deudaTotal.toFixed(
-            2
-          )}. Nota mínima aplicada: 3.00.`,
+          cupo_id: cupo.id,
+          ...evaluacion,
+          resumen:
+            'Cierre evaluado y cupo pendiente preparado. ' +
+            observaciones,
         }),
       ]
     );
 
     await client.query('COMMIT');
+    transaccionAbierta = false;
 
     return NextResponse.json({
       success: true,
-      message: `El estudiante cumple los requisitos. Se creó el cupo pendiente para el Período ${
-        periodoActual + 1
-      }.`,
+      message:
+        observaciones +
+        ' Se preparó la solicitud pendiente en Cupos. ' +
+        'El estudiante todavía no cambió de intento.',
       data: {
-        cupo: crearCupo.rows[0],
-        periodo_destino: periodoActual + 1,
-        deuda_total: deudaTotal,
-        promedio_general: promedioGeneral,
+        cupo,
+        periodo_destino:
+          evaluacion.periodo_destino,
+        tipo_transicion:
+          evaluacion.tipo_transicion,
+        promedio_general:
+          evaluacion.promedio_general,
       },
+      evaluacion,
     });
-  } catch (error) {
-    await client.query('ROLLBACK');
+  } catch (error: unknown) {
+    if (
+      client &&
+      transaccionAbierta
+    ) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error(
+          'Error revirtiendo preparación de cierre:',
+          rollbackError
+        );
+      }
+    }
 
-    console.error('Error aprobando período:', error);
+    if (
+      error instanceof ErrorCierreAcademico
+    ) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status }
+      );
+    }
+
+    console.error(
+      'Error preparando cierre académico:',
+      error
+    );
 
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : 'No se pudo aprobar el período.',
+          'No se pudo preparar el cierre. Revise la terminal.',
       },
       { status: 500 }
     );
   } finally {
-    client.release();
+    client?.release();
   }
 }

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 

@@ -6,6 +6,14 @@ import {
   Save, ArrowLeft, BookOpen, Users, GraduationCap, 
   CheckCircle2, AlertCircle, Loader2
 } from 'lucide-react';
+import CalificacionesPorEstudiante from '@/app/components/CalificacionesPorEstudiante';
+import type { TipoEvaluacion } from '@/lib/evaluacionMaterias';
+
+import {
+  valorCalificacionExistente,
+  valorCalificacionValido,
+  camposCalificacion,
+} from '@/lib/formularioCalificaciones';
 
 interface Periodo {
   id: number;
@@ -19,6 +27,7 @@ interface Asignacion {
   docente_nombre: string;
   materia_nombre: string;
   materia_codigo: string;
+  tipo_evaluacion: TipoEvaluacion;
 }
 
 interface EstudianteRow {
@@ -32,9 +41,73 @@ interface EstudianteRow {
   // Campos editables en el formulario
   nota: string;
   observaciones: string;
+  resultado_cualitativo_existente?: 'AP' | 'IN' | null;
+  inscripcion_id: string;
+  intento_id: string;
+  numero_intento: number;
+  tipo_inscripcion: 'regular' | 'tutoria';
+  periodo_origen_tutoria: number | null;
+  puede_calificar: boolean;
+  motivo_bloqueo?: string | null;
 }
 
 export default function NuevaCalificacionPage() {
+  const [modo, setModo] = useState<'materia' | 'estudiante'>('materia');
+
+  useEffect(() => {
+    const parametros = new URLSearchParams(window.location.search);
+
+    if (
+      parametros.get('modo') === 'estudiante' ||
+      parametros.has('estudiante_id')
+    ) {
+      setModo('estudiante');
+    }
+  }, []);
+
+  const cambiarModo = (nuevoModo: 'materia' | 'estudiante') => {
+    setModo(nuevoModo);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="max-w-5xl mx-auto flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => cambiarModo('materia')}
+          className={`px-4 py-2.5 rounded-xl border text-sm font-semibold transition-all ${
+            modo === 'materia'
+              ? 'bg-blue-900 text-white border-blue-900'
+              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          Por materia
+        </button>
+
+        <button
+          type="button"
+          onClick={() => cambiarModo('estudiante')}
+          className={`px-4 py-2.5 rounded-xl border text-sm font-semibold transition-all ${
+            modo === 'estudiante'
+              ? 'bg-blue-900 text-white border-blue-900'
+              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          Por estudiante
+        </button>
+      </div>
+
+      {modo === 'materia' ? (
+        <CargaPorMateria />
+      ) : (
+        <CalificacionesPorEstudiante />
+      )}
+    </div>
+  );
+}
+
+
+function CargaPorMateria() {
   const router = useRouter();
 
   const [periodos, setPeriodos] = useState<Periodo[]>([]);
@@ -48,6 +121,7 @@ export default function NuevaCalificacionPage() {
   const [loadingData, setLoadingData] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [versionCarga, setVersionCarga] = useState(0);
 
   // ── 1. Cargar periodos al montar ──
   useEffect(() => {
@@ -94,48 +168,117 @@ export default function NuevaCalificacionPage() {
 
   // ── 3. Cargar estudiantes cuando cambia la asignación ──
   useEffect(() => {
+    const controller = new AbortController();
+
+    setEstudiantes([]);
+
     if (!selectedAsignacion) {
-      setEstudiantes([]);
-      return;
+      setLoadingData(false);
+      return () => controller.abort();
     }
 
     setLoadingData(true);
-    fetch(`/api/asignaciones/${selectedAsignacion}/estudiantes`)
-      .then(r => {
-        if (r.status === 401) throw new Error('Sesión expirada. Por favor, inicia sesión nuevamente.');
-        if (!r.ok) throw new Error('Error al cargar estudiantes');
-        return r.json();
-      })
-      .then(data => {
-        const mapped: EstudianteRow[] = (data.estudiantes || []).map((e: any) => ({
-          ...e,
-          nota: e.nota_existente != null ? String(e.nota_existente) : '',
-          observaciones: e.observaciones_existentes || ''
+
+    const cargarEstudiantes = async () => {
+      try {
+        const res = await fetch(
+          `/api/asignaciones/${selectedAsignacion}/estudiantes`,
+          {
+            signal: controller.signal,
+            cache: 'no-store',
+          }
+        );
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(
+            data.error || 'No se pudieron cargar los estudiantes.'
+          );
+        }
+
+        const tipo = data.asignacion?.tipo_evaluacion;
+
+        if (tipo !== 'numerica' && tipo !== 'cualitativa') {
+          throw new Error(
+            'La API no informó el tipo de evaluación de la asignación.'
+          );
+        }
+
+        const mapped: EstudianteRow[] = (
+          data.estudiantes || []
+        ).map((est: EstudianteRow) => ({
+          ...est,
+          nota: valorCalificacionExistente(
+            tipo,
+            est.nota_existente,
+            est.resultado_cualitativo_existente
+          ),
+          observaciones: est.observaciones_existentes || '',
         }));
+
+        if (controller.signal.aborted) return;
+
         setEstudiantes(mapped);
         setError('');
-      })
-      .catch(err => {
-        setError(err.message);
-        setEstudiantes([]);
-      })
-      .finally(() => setLoadingData(false));
-  }, [selectedAsignacion]);
+      } catch (err: unknown) {
+        if (controller.signal.aborted) return;
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'No se pudieron cargar los estudiantes.'
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoadingData(false);
+        }
+      }
+    };
+
+    void cargarEstudiantes();
+
+    return () => controller.abort();
+  }, [selectedAsignacion, versionCarga]);
 
   const asignacionSeleccionada = asignaciones.find(a => a.id === selectedAsignacion);
+  const tipoEvaluacion = asignacionSeleccionada?.tipo_evaluacion;
 
-  const handleNotaChange = (id: string, value: string) => {
-    setEstudiantes(prev => prev.map(e => e.id === id ? { ...e, nota: value } : e));
+  const esCualitativa = tipoEvaluacion === 'cualitativa';
+
+  const handleNotaChange = (
+    inscripcionId: string,
+    value: string
+  ) => {
+    setEstudiantes((actuales) =>
+      actuales.map((est) =>
+        est.inscripcion_id === inscripcionId &&
+        est.puede_calificar
+          ? { ...est, nota: value }
+          : est
+      )
+    );
   };
 
-  const handleObsChange = (id: string, value: string) => {
-    setEstudiantes(prev => prev.map(e => e.id === id ? { ...e, observaciones: value } : e));
+  const handleObsChange = (
+    inscripcionId: string,
+    value: string
+  ) => {
+    setEstudiantes((actuales) =>
+      actuales.map((est) =>
+        est.inscripcion_id === inscripcionId &&
+        est.puede_calificar
+          ? { ...est, observaciones: value }
+          : est
+      )
+    );
   };
 
-  const notaEsInvalida = (val: string) => {
-    if (val === '') return false;
-    const n = parseFloat(val);
-    return isNaN(n) || n < 0 || n > 20;
+  const notaEsInvalida = (valor: string) => {
+    if (valor.trim() === '') return false;
+    if (!tipoEvaluacion) return true;
+
+    return !valorCalificacionValido(tipoEvaluacion, valor);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -145,27 +288,50 @@ export default function NuevaCalificacionPage() {
     setSuccess('');
 
     // Filtrar solo las filas que tienen nota escrita
-    const calificaciones = estudiantes
-      .filter(e => e.nota.trim() !== '')
-      .map(e => ({
-        estudiante_id: e.id,
-        nota: parseFloat(e.nota),
-        observaciones: e.observaciones
-      }));
-
-    if (calificaciones.length === 0) {
-      setError('Debes ingresar al menos una calificación para guardar');
+    if ( !selectedAsignacion || !tipoEvaluacion || loadingData ) {
+      setError('Seleccione una asignación y espere a que termine de cargar.');
       setLoading(false);
       return;
     }
 
-    // Validar rangos
-    const invalidas = calificaciones.filter(c => isNaN(c.nota) || c.nota < 0 || c.nota > 20);
+    const filasConResultado = estudiantes.filter(
+        (est) =>
+        est.puede_calificar &&
+        est.nota.trim() !== ''
+    );
+
+    if (filasConResultado.length === 0) {
+      setError('Debe ingresar al menos una calificación para guardar.');
+      setLoading(false);
+      return;
+    }
+
+    const invalidas = filasConResultado.filter(
+      (est) =>
+        !valorCalificacionValido(tipoEvaluacion, est.nota)
+    );
+
     if (invalidas.length > 0) {
-      setError('Hay notas inválidas. Todas deben estar entre 0 y 20');
+      setError(
+        esCualitativa
+          ? 'Seleccione AP o IN en las calificaciones ingresadas.'
+          : 'Las notas deben estar entre 1.00 y 5.00, con máximo dos decimales.'
+      );
       setLoading(false);
       return;
     }
+
+    const calificaciones = filasConResultado.map(
+      (est) => ({
+        estudiante_id: est.id,
+        inscripcion_id: est.inscripcion_id,
+        ...camposCalificacion(
+          tipoEvaluacion,
+          est.nota
+        ),
+        observaciones: est.observaciones,
+      })
+    );
 
     try {
       const res = await fetch('/api/calificaciones', {
@@ -195,11 +361,9 @@ export default function NuevaCalificacionPage() {
       );
 
       // Refrescar estudiantes para mostrar las notas como "existentes"
-      setTimeout(() => {
-        const current = selectedAsignacion;
-        setSelectedAsignacion('');
-        setSelectedAsignacion(current);
-      }, 1500);
+      if (!data.errores || data.errores.length === 0) {
+        setVersionCarga((actual) => actual + 1);
+      } 
 
       setTimeout(() => setSuccess(''), 5000);
     } catch (err: any) {
@@ -209,7 +373,11 @@ export default function NuevaCalificacionPage() {
     }
   };
 
-  const notasIngresadas = estudiantes.filter(e => e.nota.trim() !== '').length;
+  const notasIngresadas = estudiantes.filter(
+  (est) =>
+      est.puede_calificar &&
+      est.nota.trim() !== ''
+    ).length;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 animate-in fade-in duration-500">
@@ -347,47 +515,142 @@ export default function NuevaCalificacionPage() {
                   <thead>
                     <tr className="border-b border-slate-100 bg-slate-50/50 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">
                       <th className="px-4 py-3 w-1/3">Estudiante</th>
-                      <th className="px-4 py-3 w-32">Nota (0 – 20)</th>
+                      <th className="px-4 py-3 w-32">
+                        {esCualitativa ? 'Resultado' : 'Nota (1–5)'}
+                      </th>
                       <th className="px-4 py-3">Observaciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {estudiantes.map((est) => (
-                      <tr key={est.id} className="hover:bg-slate-50/50 transition-colors">
-                        <td className="px-4 py-3">
+                      <tr
+                        key={est.inscripcion_id}
+                        className="hover:bg-slate-50/50 transition-colors"
+                      >
+                        <td className="px-4 py-3 align-middle">
                           <div className="font-medium text-slate-900">
                             {est.apellidos} {est.nombres}
                           </div>
-                          <div className="text-xs text-slate-500">CI: {est.cedula}</div>
-                          {est.nota_existente != null && (
-                            <div className="text-xs text-emerald-600 font-medium mt-0.5">
-                              Nota previa: {est.nota_existente}
+
+                          <div className="text-xs text-slate-500">
+                            CI: {est.cedula}
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 mt-1">
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                est.tipo_inscripcion === 'tutoria'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-blue-50 text-blue-700'
+                              }`}
+                            >
+                              {est.tipo_inscripcion === 'tutoria'
+                                ? `Tutoría · Origen período ${
+                                    est.periodo_origen_tutoria ?? '—'
+                                  }`
+                                : 'Regular'}
+                            </span>
+
+                            <span className="text-[10px] text-slate-500">
+                              Intento {est.numero_intento}
+                            </span>
+                          </div>
+
+                          {est.motivo_bloqueo && (
+                            <p className="text-xs text-amber-700 mt-1">
+                              {est.motivo_bloqueo}
+                            </p>
+                          )}
+
+                          {(est.resultado_cualitativo_existente ||
+                            est.nota_existente != null) && (
+                            <div className="text-xs text-emerald-600 font-medium mt-1">
+                              Calificación previa:{' '}
+                              {esCualitativa
+                                ? est.resultado_cualitativo_existente ||
+                                  'Sin nomenclatura'
+                                : est.nota_existente}
                             </div>
                           )}
                         </td>
-                        <td className="px-4 py-3">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="1"
-                            max="5"
-                            value={est.nota}
-                            onChange={(e) => handleNotaChange(est.id, e.target.value)}
-                            placeholder="1-5"
-                            className={`w-full px-3 py-2 bg-slate-50 border rounded-lg text-sm focus:outline-none focus:ring-2 transition-all ${
-                              notaEsInvalida(est.nota)
-                                ? 'border-red-300 focus:border-red-500 focus:ring-red-500/20 text-red-700'
-                                : 'border-slate-200 focus:border-blue-500 focus:ring-blue-500/20'
-                            }`}
-                          />
+
+                        <td className="px-4 py-3 align-middle">
+                          {esCualitativa ? (
+                            <select
+                              aria-label={`Resultado de ${est.apellidos} ${est.nombres}`}
+                              value={est.nota}
+                              disabled={
+                                loading ||
+                                loadingData ||
+                                !est.puede_calificar
+                              }
+                              onChange={(event) =>
+                                handleNotaChange(
+                                  est.inscripcion_id,
+                                  event.target.value
+                                )
+                              }
+                              className="w-full h-[42px] min-w-[140px] px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50"
+                            >
+                              <option value="">
+                                Sin calificar
+                              </option>
+
+                              <option value="AP">
+                                AP — Aprobado
+                              </option>
+
+                              <option value="IN">
+                                IN — Inasistentes
+                              </option>
+                            </select>
+                          ) : (
+                            <input
+                              aria-label={`Nota de ${est.apellidos} ${est.nombres}`}
+                              type="number"
+                              step="0.01"
+                              min="1"
+                              max="5"
+                              value={est.nota}
+                              disabled={
+                                loading ||
+                                loadingData ||
+                                !est.puede_calificar
+                              }
+                              onChange={(event) =>
+                                handleNotaChange(
+                                  est.inscripcion_id,
+                                  event.target.value
+                                )
+                              }
+                              placeholder="1.00–5.00"
+                              className={`w-full h-[42px] min-w-[120px] px-3 py-2 bg-slate-50 border rounded-lg text-sm focus:outline-none focus:ring-2 transition-all disabled:opacity-50 ${
+                                notaEsInvalida(est.nota)
+                                  ? 'border-red-300 focus:border-red-500 focus:ring-red-500/20 text-red-700'
+                                  : 'border-slate-200 focus:border-blue-500 focus:ring-blue-500/20'
+                              }`}
+                            />
+                          )}
                         </td>
-                        <td className="px-4 py-3">
+
+                        <td className="px-4 py-3 align-middle">
                           <input
+                            aria-label={`Observaciones de ${est.apellidos} ${est.nombres}`}
                             type="text"
                             value={est.observaciones}
-                            onChange={(e) => handleObsChange(est.id, e.target.value)}
+                            disabled={
+                              loading ||
+                              loadingData ||
+                              !est.puede_calificar
+                            }
+                            onChange={(event) =>
+                              handleObsChange(
+                                est.inscripcion_id,
+                                event.target.value
+                              )
+                            }
                             placeholder="Observaciones del docente..."
-                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                            className="w-full h-[42px] min-w-[220px] px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50"
                           />
                         </td>
                       </tr>
@@ -401,7 +664,7 @@ export default function NuevaCalificacionPage() {
             <div className="p-4 border-t border-slate-100 bg-slate-50/30">
               <button
                 type="submit"
-                disabled={loading || estudiantes.length === 0 || notasIngresadas === 0}
+               disabled={ loading || loadingData || estudiantes.length === 0 || notasIngresadas === 0}
                 className="w-full px-4 py-3 bg-blue-900 text-white rounded-xl font-semibold text-sm hover:bg-blue-950 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? (

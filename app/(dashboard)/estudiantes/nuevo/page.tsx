@@ -26,7 +26,7 @@ export default function NuevoEstudiantePage() {
   const [periodo, setPeriodo] = useState(1);
   const [obligatorias, setObligatorias] = useState<Materia[]>([]);
   const [complementarias, setComplementarias] = useState<Materia[]>([]);
-  const [materiaSeleccionada, setMateriaSeleccionada] = useState<string | null>(null);
+  const [materiasSeleccionadas, setMateriasSeleccionadas] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [config, setConfig] = useState<ConfigData>({ costo_inscripcion: '25', tasa_cambio: '480' });
 
@@ -70,14 +70,51 @@ export default function NuevoEstudiantePage() {
   }, []);
 
   useEffect(() => {
-    fetch(`/api/periodos/${periodo}/materias`)
-      .then(r => r.json())
-      .then(d => {
-        setObligatorias(d.obligatorias || []);
-        setComplementarias(d.complementarias || []);
-        setMateriaSeleccionada(null); // Resetear selección
-      })
-      .catch(console.error);
+    const controller = new AbortController();
+
+    setObligatorias([]);
+    setComplementarias([]);
+    setMateriasSeleccionadas([]);
+
+    const cargarMaterias = async () => {
+      try {
+        const res = await fetch(`/api/periodos/${periodo}/materias`, {
+          signal: controller.signal,
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(
+            data.error || 'No se pudieron cargar las materias del período.'
+          );
+        }
+
+        if (controller.signal.aborted) return;
+
+        setObligatorias(data.obligatorias || []);
+        setComplementarias(data.complementarias || []);
+        setMateriasSeleccionadas(
+          periodo === 6
+            ? (data.complementarias || []).map(
+                (materia: Materia) => materia.id
+              )
+            : []
+        );
+      } catch (err: unknown) {
+        if (controller.signal.aborted) return;
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'No se pudieron cargar las materias del período.'
+        );
+      }
+    };
+
+    void cargarMaterias();
+
+    return () => controller.abort();
   }, [periodo]);
 
   // Calcular Bs esperados automáticamente
@@ -123,6 +160,20 @@ export default function NuevoEstudiantePage() {
     return '';
   };
 
+  const toggleMateriaComplementaria = (materiaId: string) => {
+    setMateriasSeleccionadas((actuales) => {
+      if (actuales.includes(materiaId)) {
+        return actuales.filter((id) => id !== materiaId);
+      }
+
+      if (actuales.length >= 2) {
+        return actuales;
+      }
+
+      return [...actuales, materiaId];
+    });
+  };
+
   const handleSubmit = async () => {
     const validationError = validarPago();
     if (validationError) { setError(validationError); return; }
@@ -133,7 +184,7 @@ export default function NuevoEstudiantePage() {
       const payload: any = {
         ...formData,
         periodo_id: periodo,
-        materias_complementarias: materiaSeleccionada ? [materiaSeleccionada] : [],
+        materias_complementarias: materiasSeleccionadas,
         pago: {
           monto: parseFloat(pagoData.monto),
           metodo_pago: pagoData.metodo_pago,
@@ -268,20 +319,53 @@ export default function NuevoEstudiantePage() {
             )}
             {complementarias.length > 0 && (
               <div className="md:col-span-2 bg-violet-50 border border-violet-200 rounded-xl p-4 space-y-3">
-                <p className="text-xs font-bold text-violet-700 uppercase">Materia Complementaria (Opcional)</p>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-bold text-violet-700 uppercase">
+                    Materias Complementarias (Opcionales)
+                  </p>
+
+                  <span className="text-xs font-semibold text-violet-700 whitespace-nowrap">
+                    {materiasSeleccionadas.length}/2 seleccionadas
+                  </span>
+                </div>
+
+                <p className="text-xs text-violet-600">
+                  {periodo === 6
+                    ? 'Al ingresar directamente al período 6 se inscriben Idiomas y Oficio.'
+                    : 'Puedes seleccionar hasta dos materias complementarias para este período.'}
+                </p>
+
                 <div className="space-y-2">
-                  {complementarias.map(m => (
-                    <label key={m.id} className="flex items-center gap-3 p-2 hover:bg-white/50 rounded-lg cursor-pointer transition">
-                      <input
-                        type="radio"
-                        name="complementaria"
-                        checked={materiaSeleccionada === m.id}
-                        onChange={() => setMateriaSeleccionada(m.id)}
-                        className="w-4 h-4 text-violet-600 rounded-full cursor-pointer"
-                      />
-                      <span className="text-sm text-slate-700 font-medium">{m.nombre}</span>
-                    </label>
-                  ))}
+                  {complementarias.map((m) => {
+                    const seleccionada = materiasSeleccionadas.includes(m.id);
+                    const deshabilitada =
+                      !seleccionada && materiasSeleccionadas.length >= 2;
+
+                    return (
+                      <label
+                        key={m.id}
+                        className={`flex items-center gap-3 p-2 rounded-lg transition ${
+                          deshabilitada
+                            ? 'opacity-50 cursor-not-allowed'
+                            : 'hover:bg-white/50 cursor-pointer'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          name="complementarias"
+                          value={m.id}
+                          checked={seleccionada}
+                          disabled={periodo === 6 || deshabilitada}
+                          onChange={() => toggleMateriaComplementaria(m.id)}
+                          className="w-4 h-4 text-violet-600 rounded cursor-pointer disabled:cursor-not-allowed"
+                        />
+
+                        <span className="text-sm text-slate-700 font-medium">
+                          {m.nombre}
+                        </span>
+                      </label>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -431,7 +515,15 @@ export default function NuevoEstudiantePage() {
               <span className="text-slate-500">Período:</span>
               <span className="font-semibold text-blue-600">Período {periodo}</span>
               <span className="text-slate-500">Materias:</span>
-              <span className="font-semibold text-slate-900">{obligatorias.length} obligatorias{materiaSeleccionada ? ' + 1 complementaria' : ''}</span>
+              <span className="font-semibold text-slate-900">
+              {obligatorias.length} obligatorias
+              {materiasSeleccionadas.length > 0 &&
+                ` + ${materiasSeleccionadas.length} ${
+                  materiasSeleccionadas.length === 1
+                    ? 'complementaria'
+                    : 'complementarias'
+                }`}
+            </span>
             </div>
           </div>
 
