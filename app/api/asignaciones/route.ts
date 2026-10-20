@@ -86,46 +86,29 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const token = request.cookies.get('token')?.value ?? '';
-  const actor = verifyToken(token);
+  const actor = verifyToken(
+    request.cookies.get('token')?.value ?? ''
+  );
+
   if (!actor) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
-  }
-
-  if (!ROLES_QUE_PUEDEN_CREAR.includes(actor.rol)) {
-    return NextResponse.json({ error: 'No tiene permisos para crear asignaciones' }, { status: 403 });
-  }
-
-  try {
-    const body = await request.json();
-    const { docente_id, materia_id, periodo_id } = body;
-
-    if (!docente_id || !materia_id || !periodo_id) {
-      return NextResponse.json(
-        { error: 'Faltan datos obligatorios: docente_id, materia_id, periodo_id' },
-        { status: 400 }
-      );
-    }
-
-    if (periodo_id < 1 || periodo_id > 6) {
-      return NextResponse.json({ error: 'Periodo debe estar entre 1 y 6' }, { status: 400 });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO asignaciones_docentes (docente_id, materia_id, periodo_id)
-       VALUES ($1, $2, $3) RETURNING *`,
-      [docente_id, materia_id, periodo_id]
+    return NextResponse.json(
+      { error: 'No autorizado.' },
+      { status: 401 }
     );
-
-    await pool.query(
-      `INSERT INTO auditoria (tabla_afectada, accion, usuario_id, datos_nuevos)
-       VALUES ($1, $2, $3, $4)`,
-      ['asignaciones_docentes', 'INSERT', actor.userId, JSON.stringify({ docente_id, materia_id, periodo_id, timestamp: new Date() })]
-    );
-
-    return NextResponse.json({ asignacion: result.rows[0] });
-  } catch (error) {
-    console.error('Error POST asignaciones:', error);
-    return NextResponse.json({ error: 'Error al asignar', detalle: error }, { status: 500 });
   }
+
+  if (!['director', 'secretaria'].includes(actor.rol)) {
+    return NextResponse.json(
+      { error: 'No tiene permisos para gestionar asignaciones.' },
+      { status: 403 }
+    );
+  }
+
+  return NextResponse.json(
+    {
+      error:
+        'Utilice la nueva pantalla de asignaciones por período para guardar los cambios.',
+    },
+    { status: 405 }
+  );
 }

@@ -1,222 +1,360 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import {
   FileDown,
-  Filter,
   AlertCircle,
   CheckCircle2,
   Loader2,
-  BarChart3
+  BarChart3,
 } from 'lucide-react';
-import { useLoading } from '@/app/components/LoadingContext';
 
 interface Periodo {
   id: number;
   nombre: string;
-  descripcion: string;
   activo: boolean;
 }
 
 export default function EstadisticasPage() {
   const [periodos, setPeriodos] = useState<Periodo[]>([]);
-  const [periodoSeleccionado, setPeriodoSeleccionado] = useState<string>('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>('');
-  const [success, setSuccess] = useState<string>('');
-  const { startLoading, stopLoading } = useLoading();
+  const [anos, setAnos] = useState<string[]>([]);
 
-  // Cargar periodos al montar
+  const [periodo, setPeriodo] = useState('');
+  const [ano, setAno] = useState('');
+
+  const [iniciando, setIniciando] = useState(true);
+  const [generando, setGenerando] = useState(false);
+
+  const [error, setError] = useState('');
+  const [mensaje, setMensaje] = useState('');
+
   useEffect(() => {
-    fetch('/api/periodos')
-      .then(r => r.json())
-      .then(data => {
-        if (data.periodos && data.periodos.length > 0) {
-          setPeriodos(data.periodos);
-          setPeriodoSeleccionado(String(data.periodos[0].id));
+    let cancelado = false;
+
+    async function cargar() {
+      try {
+        const [resPeriodos, resAnos] =
+          await Promise.all([
+            fetch('/api/periodos', {
+              cache: 'no-store',
+            }),
+            fetch('/api/asignaciones/anos', {
+              cache: 'no-store',
+            }),
+          ]);
+
+        const [datosPeriodos, datosAnos] =
+          await Promise.all([
+            resPeriodos.json(),
+            resAnos.json(),
+          ]);
+
+        if (!resPeriodos.ok) {
+          throw new Error(
+            datosPeriodos.error ||
+              'No se pudieron cargar los períodos.'
+          );
         }
-      })
-      .catch(err => {
-        console.error('Error cargando períodos:', err);
-        setError('Error al cargar los períodos');
-      });
+
+        if (!resAnos.ok) {
+          throw new Error(
+            datosAnos.error ||
+              'No se pudieron cargar los años escolares.'
+          );
+        }
+
+        if (cancelado) return;
+
+        const listaPeriodos: Periodo[] =
+          datosPeriodos.periodos || [];
+
+        const listaAnos: string[] =
+          datosAnos.anos || [];
+
+        setPeriodos(listaPeriodos);
+        setAnos(listaAnos);
+
+        setPeriodo(
+          listaPeriodos[0]
+            ? String(listaPeriodos[0].id)
+            : ''
+        );
+
+        setAno(
+          datosAnos.configurado ||
+            listaAnos[0] ||
+            ''
+        );
+      } catch (errorCarga) {
+        if (!cancelado) {
+          setError(
+            errorCarga instanceof Error
+              ? errorCarga.message
+              : 'No se pudo iniciar la pantalla.'
+          );
+        }
+      } finally {
+        if (!cancelado) {
+          setIniciando(false);
+        }
+      }
+    }
+
+    cargar();
+
+    return () => {
+      cancelado = true;
+    };
   }, []);
 
-  const generarExcel = useCallback(async () => {
-    if (!periodoSeleccionado) {
-      setError('Por favor, selecciona un período');
-      return;
-    }
+  async function generarExcel() {
+    if (!periodo || !ano || generando) return;
 
+    setGenerando(true);
     setError('');
-    setSuccess('');
-    setLoading(true);
-    startLoading();
+    setMensaje('');
 
     try {
-      const res = await fetch('/api/estadisticas', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          periodo_id: parseInt(periodoSeleccionado),
-          ano_escolar: '2025-2026'
-        })
-      });
+      const respuesta = await fetch(
+        '/api/estadisticas',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            periodo_id: Number(periodo),
+            ano_escolar: ano,
+          }),
+        }
+      );
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Error generando reporte');
+      if (!respuesta.ok) {
+        let detalle =
+          `No se pudo generar el reporte (${respuesta.status}).`;
+
+        try {
+          const datos = await respuesta.json();
+          detalle = datos.error || detalle;
+        } catch {
+          // Conserva el estado HTTP si no hay JSON.
+        }
+
+        throw new Error(detalle);
       }
 
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
+      const archivo = await respuesta.blob();
+      const url = URL.createObjectURL(archivo);
 
-      // Obtener nombre del período para el archivo
-      const periodo = periodos.find(p => p.id === parseInt(periodoSeleccionado));
-      const periodoNombre = periodo?.nombre || `Periodo_${periodoSeleccionado}`;
-      const hoy = new Date();
-      const fecha = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}-${String(hoy.getDate()).padStart(2, '0')}`;
+      const disposicion =
+        respuesta.headers.get('Content-Disposition');
 
-      a.download = `ResumenAcademico_${periodoNombre}_2025-2026_${fecha}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      const nombreServidor =
+        disposicion?.match(/filename="([^"]+)"/)?.[1];
 
-      setSuccess('¡Reporte generado y descargado exitosamente!');
-      setTimeout(() => setSuccess(''), 3000);
-    } catch (error: any) {
-      console.error('Error generando reporte:', error);
-      setError(error.message || 'Error al generar el reporte');
+      const enlace = document.createElement('a');
+      enlace.href = url;
+      enlace.download =
+        nombreServidor ||
+        `ResumenAcademico_Periodo_${periodo}_${ano}.xlsx`;
+
+      document.body.appendChild(enlace);
+      enlace.click();
+      enlace.remove();
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+      setMensaje(
+        'Resumen académico generado y descargado.'
+      );
+    } catch (errorExportacion) {
+      setError(
+        errorExportacion instanceof Error
+          ? errorExportacion.message
+          : 'No se pudo generar el reporte.'
+      );
     } finally {
-      setLoading(false);
-      stopLoading();
+      setGenerando(false);
     }
-  }, [periodoSeleccionado, periodos, startLoading, stopLoading]);
+  }
 
-  const handleCancelar = () => {
-    setPeriodoSeleccionado('');
-    setError('');
-    setSuccess('');
-  };
+  const ocupado = iniciando || generando;
+
+  const claseCampo =
+    'w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none disabled:opacity-50';
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <BarChart3 className="w-7 h-7 text-emerald-600" />
           Estadísticas Académicas
         </h1>
+
         <p className="text-slate-500 text-sm mt-1">
-          Genera reportes oficiales del rendimiento estudiantil por período
+          Resumen del rendimiento estudiantil por
+          período y año escolar.
         </p>
       </div>
 
-      {/* Formulario */}
       <div className="bg-white rounded-2xl p-8 border border-slate-200 shadow-sm">
-        <div className="max-w-2xl">
-          {/* Título del formulario */}
-          <h2 className="text-lg font-semibold text-slate-900 mb-6">Generar Resumen Académico</h2>
+        <div className="max-w-2xl space-y-6">
+          <h2 className="text-lg font-semibold text-slate-900">
+            Generar Resumen Académico
+          </h2>
 
-          {/* Selector de período */}
-          <div className="mb-6">
-            <label className="block text-sm font-medium text-slate-700 mb-3">
-              Período Académico <span className="text-red-500">*</span>
+          <div>
+            <label
+              htmlFor="periodo-resumen"
+              className="block text-sm font-medium text-slate-700 mb-2"
+            >
+              Período académico
             </label>
-            <div className="relative">
-              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-              <select
-                value={periodoSeleccionado}
-                onChange={(e) => {
-                  setPeriodoSeleccionado(e.target.value);
-                  setError('');
-                }}
-                disabled={loading}
-                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-              >
-                {periodos.length === 0 ? (
-                  <option value="">Cargando períodos...</option>
-                ) : (
-                  periodos.map(p => (
-                    <option key={p.id} value={p.id}>
-                      {p.nombre} {p.descripcion ? `- ${p.descripcion}` : ''}
-                    </option>
-                  ))
-                )}
-              </select>
-            </div>
-            <p className="text-xs text-slate-500 mt-2">
-              Selecciona el período para el cual deseas generar el reporte académico
-            </p>
+
+            <select
+              id="periodo-resumen"
+              value={periodo}
+              disabled={ocupado}
+              onChange={(evento) => {
+                setPeriodo(evento.target.value);
+                setMensaje('');
+              }}
+              className={claseCampo}
+            >
+              <option value="">
+                {iniciando
+                  ? 'Cargando períodos...'
+                  : 'Seleccione un período'}
+              </option>
+
+              {periodos.map((item) => (
+                <option
+                  key={item.id}
+                  value={item.id}
+                >
+                  {item.nombre}
+                </option>
+              ))}
+            </select>
           </div>
 
-          {/* Errores */}
+          <div>
+            <label
+              htmlFor="ano-resumen"
+              className="block text-sm font-medium text-slate-700 mb-2"
+            >
+              Año escolar
+            </label>
+
+            <select
+              id="ano-resumen"
+              value={ano}
+              disabled={ocupado}
+              onChange={(evento) => {
+                setAno(evento.target.value);
+                setMensaje('');
+              }}
+              className={claseCampo}
+            >
+              <option value="">
+                {iniciando
+                  ? 'Cargando años...'
+                  : 'Seleccione un año escolar'}
+              </option>
+
+              {anos.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3 animate-in slide-in-from-top-2 duration-200">
-              <AlertCircle size={20} className="text-red-600 flex-shrink-0 mt-0.5" />
-              <div>
-                <p className="font-medium text-red-900">{error}</p>
-              </div>
+            <div
+              role="alert"
+              className="p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3 text-red-800 text-sm"
+            >
+              <AlertCircle
+                size={20}
+                className="shrink-0"
+              />
+              <p>{error}</p>
             </div>
           )}
 
-          {/* Éxito */}
-          {success && (
-            <div className="mb-6 p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-start gap-3 animate-in slide-in-from-top-2 duration-200">
-              <CheckCircle2 size={20} className="text-emerald-600 flex-shrink-0 mt-0.5" />
-              <div>
-                <p className="font-medium text-emerald-900">{success}</p>
-              </div>
+          {mensaje && (
+            <div
+              role="status"
+              className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-start gap-3 text-emerald-800 text-sm"
+            >
+              <CheckCircle2
+                size={20}
+                className="shrink-0"
+              />
+              <p>{mensaje}</p>
             </div>
           )}
 
-          {/* Botones */}
-          <div className="flex gap-3 pt-4">
-            <button
-              onClick={generarExcel}
-              disabled={loading || !periodoSeleccionado}
-              className="inline-flex items-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl font-medium transition-colors"
-            >
-              {loading ? (
-                <>
-                  <Loader2 size={18} className="animate-spin" />
-                  Generando reporte...
-                </>
-              ) : (
-                <>
-                  <FileDown size={18} />
-                  Generar Excel
-                </>
-              )}
-            </button>
+          <button
+            type="button"
+            onClick={generarExcel}
+            disabled={
+              ocupado ||
+              !periodo ||
+              !ano
+            }
+            className="inline-flex items-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl font-medium transition-colors"
+          >
+            {generando ? (
+              <Loader2
+                size={18}
+                className="animate-spin"
+              />
+            ) : (
+              <FileDown size={18} />
+            )}
 
-            <button
-              onClick={handleCancelar}
-              disabled={loading}
-              className="inline-flex items-center gap-2 px-6 py-3 bg-slate-200 hover:bg-slate-300 disabled:bg-slate-200 text-slate-800 rounded-xl font-medium transition-colors"
-            >
-              Cancelar
-            </button>
-          </div>
+            {generando
+              ? 'Generando reporte...'
+              : 'Generar Excel'}
+          </button>
         </div>
       </div>
 
-      {/* Información */}
       <div className="bg-slate-50 rounded-2xl p-6 border border-slate-200">
-        <h3 className="font-semibold text-slate-900 mb-3 flex items-center gap-2">
-          <CheckCircle2 size={18} className="text-emerald-600" />
-          Contenido del reporte
+        <h3 className="font-semibold text-slate-900 mb-3">
+          Criterios del reporte
         </h3>
-        <ul className="text-sm text-slate-600 space-y-2 ml-6">
-          <li className="list-disc">Datos del plantel (código, nombre, dirección, teléfono, director)</li>
-          <li className="list-disc">Lista de estudiantes inscritos en el período con sus calificaciones</li>
-          <li className="list-disc">Componentes básicos: Lengua, Matemática, Memoria-Territorio, Ciencias Naturales</li>
-          <li className="list-disc">Totales por componente (inscritos, asistentes, aprobados, no aprobados)</li>
-          <li className="list-disc">Profesores asignados por componente</li>
-          <li className="list-disc">Firmas de director y receptor</li>
+
+        <ul className="list-disc pl-5 space-y-2 text-sm text-slate-600">
+          <li>
+            Utiliza el intento más reciente de cada
+            estudiante en el período y año seleccionado.
+          </li>
+          <li>
+            Las materias numéricas se aprueban desde 3.
+          </li>
+          <li>
+            Participación se imprime como AP o IN.
+          </li>
+          <li>
+            Idiomas y Oficio utilizan el resultado
+            cualitativo registrado.
+          </li>
+          <li>
+            Las notas pendientes se dejan vacías y
+            se informan en Observaciones.
+          </li>
+          <li>
+            Las tutorías se detallan en una hoja
+            adicional cuando existen.
+          </li>
+          <li>
+            El formato principal admite 30 estudiantes.
+            Si se supera, la exportación se detiene
+            para no omitir personas.
+          </li>
         </ul>
       </div>
     </div>

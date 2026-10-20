@@ -27,10 +27,50 @@ interface Estudiante {
 
 export default function EstudiantesPage() {
   const router = useRouter();
+  const [rol, setRol] = useState<string | null>(null);
+
+  const puedeCrearEstudiante = rol === 'director' || rol === 'secretaria';
   const [estudiantes, setEstudiantes] = useState<Estudiante[]>([]);
   const [loading, setLoading] = useState(true);
   const [busqueda, setBusqueda] = useState('');
   const [periodoFilter, setPeriodoFilter] = useState('');
+  useEffect(() => {
+    let cancelado = false;
+
+    async function cargarRol() {
+      try {
+        const respuesta = await fetch('/api/auth/me', {
+          cache: 'no-store',
+        });
+
+        if (!respuesta.ok) {
+          throw new Error('No se pudo consultar la sesión.');
+        }
+
+        const usuario = await respuesta.json();
+
+        if (!cancelado) {
+          setRol(
+            typeof usuario.rol === 'string'
+              ? usuario.rol
+              : null
+          );
+        }
+      } catch (error) {
+        console.error('Error al consultar el rol:', error);
+
+        if (!cancelado) {
+          setRol(null);
+        }
+      }
+    }
+
+    cargarRol();
+
+    return () => {
+      cancelado = true;
+    };
+  }, []);
 
   useEffect(() => {
     fetch('/api/estudiantes')
@@ -72,15 +112,18 @@ export default function EstudiantesPage() {
           <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Gestión de Estudiantes</h1>
           <p className="text-slate-500 text-sm mt-1">Administración de matrícula y materias</p>
         </div>
-        <div className="flex gap-3">
-          <button 
-            onClick={() => router.push('/estudiantes/nuevo')}
-            className="px-4 py-2.5 bg-blue-900 text-white rounded-xl font-semibold text-sm hover:bg-blue-950 transition-all shadow-lg shadow-blue-900/20 flex items-center gap-2"
-          >
-            <Plus size={18} />
-            <span>Nuevo Estudiante</span>
-          </button>
-        </div>
+        {puedeCrearEstudiante && (
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => router.push('/estudiantes/nuevo')}
+              className="px-4 py-2.5 bg-blue-900 text-white rounded-xl font-semibold text-sm hover:bg-blue-950 transition-all shadow-lg shadow-blue-900/20 flex items-center gap-2"
+            >
+              <Plus size={18} />
+              <span>Nuevo Estudiante</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Stats Cards */}

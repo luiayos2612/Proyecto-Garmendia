@@ -34,6 +34,7 @@ type MenuSubItem = {
   href: string;
   icon: any;
   soloDirector?: boolean;
+  soloAdministracion?: boolean;
 };
 
 type MenuItem = {
@@ -43,6 +44,7 @@ type MenuItem = {
   href: string;
   subItems: MenuSubItem[];
   soloDirector?: boolean;
+  soloAdministracion?: boolean;
 };
 
 const menuStructure: MenuItem[] = [
@@ -60,7 +62,7 @@ const menuStructure: MenuItem[] = [
     href: '#',
     subItems: [
       { title: 'Estudiantes', href: '/estudiantes', icon: Users },
-      { title: 'Nueva Inscripcion', href: '/estudiantes/nuevo', icon: PlusCircle, soloDirector: true },
+      { title: 'Inscribir', href: '/estudiantes/nuevo', icon: PlusCircle, soloAdministracion: true, },
       { title: 'Docentes', href: '/docentes', icon: GraduationCap, soloDirector: true },
       { title: 'Materias', href: '/materias', icon: BookOpen, soloDirector: true },
       { title: 'Asignaciones', href: '/asignaciones', icon: ClipboardList },
@@ -85,21 +87,14 @@ const menuStructure: MenuItem[] = [
     title: 'Reportes',
     icon: FileText,
     href: '/reportes',
-    soloDirector: true,
+    soloAdministracion: true,
     subItems: [
-      { title: 'Auditoría', href: '/reportes/auditoria', icon: Activity },
+      { title: 'Seguimiento', href: '/reportes/auditoria', icon: Activity },
       { title: 'Boletines', href: '/reportes/boletines', icon: FileText },
       { title: 'Estadísticas', href: '/reportes/estadisticas', icon: FileText },
     ],
   },
-  {
-    id: 'config',
-    title: 'Configuración',
-    icon: Settings,
-    href: '/configuracion',
-    soloDirector: true,
-    subItems: [],
-  },
+  
 ];
 
 interface LayoutProps {
@@ -119,21 +114,28 @@ export default function Layout({ children, rol, nombre }: LayoutProps) {
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['academico']);
   const { isLoading } = useLoading();
 
-  const esDirector = rol === 'director';
+ const esDirector = rol === 'director';
 
-  const menuVisible = menuStructure
-    .filter((item) => !item.soloDirector || esDirector)
+  const esAdministracion = rol === 'director' || rol === 'secretaria';
+  const menuVisible = menuStructure.filter((item) => (!item.soloDirector || esDirector) && ( !item.soloAdministracion ||esAdministracion ) )
     .map((item) => ({
       ...item,
-      subItems: item.subItems.filter((sub) => !sub.soloDirector || esDirector),
+      subItems: item.subItems.filter(
+        (sub) =>
+          (!sub.soloDirector || esDirector) &&
+          (
+            !sub.soloAdministracion ||
+            esAdministracion
+          )
+      ),
     }));
 
   const handleLogout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
-    // ✅ MODIFICADO: antes era router.push('/login').
-    // window.location.href fuerza que TODO el árbol de React se desmonte
-    // y se vuelva a pedir al servidor, eliminando cualquier estado de rol
-    // "pegado" en memoria del navegador (Router Cache de Next.js).
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+    });
+
     window.location.href = '/login';
   };
 
@@ -304,8 +306,8 @@ export default function Layout({ children, rol, nombre }: LayoutProps) {
             <span className="text-sm font-bold">Cerrar Sesión</span>
           </button>
           <div className="mt-4 text-center">
-            <p className="text-[10px] text-blue-300">v1.0 - 2026</p>
-            <p className="text-[10px] text-blue-400">Servicio Comunitario</p>
+            <p className="text-[10px] text-blue-300">Version 3.5.2 </p>
+            <p className="text-[10px] text-blue-400">Sistema de administracion de U.E.P Julio Garmendia</p>
           </div>
         </div>
       </aside>
@@ -522,7 +524,11 @@ export default function Layout({ children, rol, nombre }: LayoutProps) {
               <div className="text-right hidden sm:block">
                 <p className="text-xs font-bold text-slate-900">{nombre}</p>
                 <p className="text-[10px] text-slate-500 font-bold uppercase">
-                  {esDirector ? 'Director' : 'Docente'}
+                  {rol === 'director'
+                  ? 'Director'
+                  : rol === 'secretaria'
+                    ? 'Secretaría'
+                    : 'Docente'}
                 </p>
               </div>
               <div className="h-8 w-8 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center border-2 border-white">

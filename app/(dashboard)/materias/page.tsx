@@ -2,14 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
-  BookOpen, 
-  Plus, 
-  Search, 
-  MoreVertical, 
-  GraduationCap,
+import {
+  BookOpen,
+  Search,
   Layers,
-  Filter
 } from 'lucide-react';
 
 interface Materia {
@@ -17,12 +13,11 @@ interface Materia {
   codigo: string;
   nombre: string;
   descripcion: string;
-  grados_aplicables: string;
   activa: boolean;
 }
 
 export default function MateriasPage() {
-  const router = useRouter();
+  
   const [materias, setMaterias] = useState<Materia[]>([]);
   const [loading, setLoading] = useState(true);
   const [busqueda, setBusqueda] = useState('');
@@ -46,16 +41,7 @@ export default function MateriasPage() {
     m.descripcion?.toLowerCase().includes(busqueda.toLowerCase())
   );
 
-  const getGradosLabel = (grados: string) => {
-    const labels: Record<string, string> = {
-      'todos': 'Todos los grados',
-      '1ro-3ro': '1ro a 3ro',
-      '4to-6to': '4to a 6to',
-      '1ro-2do': '1ro y 2do',
-      '5to-6to': '5to y 6to'
-    };
-    return labels[grados] || grados;
-  };
+
 
   if (loading) {
     return (
@@ -73,17 +59,10 @@ export default function MateriasPage() {
           <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Gestión de Materias</h1>
           <p className="text-slate-500 text-sm mt-1">Asignaturas del currículo escolar</p>
         </div>
-        <button 
-          onClick={() => router.push('/materias/nuevo')}
-          className="px-4 py-2.5 bg-blue-900 text-white rounded-xl font-semibold text-sm hover:bg-blue-950 transition-all shadow-lg shadow-blue-900/20 flex items-center gap-2"
-        >
-          <Plus size={18} />
-          <span>Nueva Materia</span>
-        </button>
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center gap-4">
           <div className="p-3 bg-blue-50 rounded-xl text-blue-600">
             <BookOpen size={24} />
@@ -106,17 +85,6 @@ export default function MateriasPage() {
           </div>
         </div>
 
-        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center gap-4">
-          <div className="p-3 bg-violet-50 rounded-xl text-violet-600">
-            <GraduationCap size={24} />
-          </div>
-          <div>
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Áreas</p>
-            <p className="text-2xl font-extrabold text-slate-900">
-              {new Set(materias.map(m => m.grados_aplicables)).size}
-            </p>
-          </div>
-        </div>
       </div>
 
       {/* Filters */}
@@ -142,25 +110,15 @@ export default function MateriasPage() {
           </div>
         ) : (
           materiasFiltradas.map((materia) => (
-            <div 
-              key={materia.id} 
-              className="group bg-white rounded-2xl p-6 border border-slate-200 shadow-sm hover:shadow-lg transition-all duration-300 hover:-translate-y-1 cursor-pointer"
-              onClick={() => router.push(`/materias/${materia.id}`)}
-            >
+            <div
+                key={materia.id}
+                className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm"
+              >
               {/* Header Card */}
               <div className="flex justify-between items-start mb-4">
                 <div className="h-14 w-14 rounded-xl bg-gradient-to-br from-blue-100 to-blue-200 text-blue-700 flex items-center justify-center font-bold text-lg shrink-0">
                   {materia.codigo}
                 </div>
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // Acción editar
-                  }}
-                  className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                >
-                  <MoreVertical size={18} />
-                </button>
               </div>
 
               {/* Info */}
@@ -169,16 +127,6 @@ export default function MateriasPage() {
                 <p className="text-sm text-slate-500 line-clamp-2">{materia.descripcion || 'Sin descripción'}</p>
               </div>
 
-              {/* Grados */}
-              <div className="pt-4 border-t border-slate-100">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-slate-500">Aplica para:</span>
-                  <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-violet-50 text-violet-700 border border-violet-100">
-                    <GraduationCap size={12} className="mr-1" />
-                    {getGradosLabel(materia.grados_aplicables)}
-                  </span>
-                </div>
-              </div>
 
               {/* Footer */}
               <div className="mt-4 pt-4 border-t border-slate-100 flex justify-between items-center">

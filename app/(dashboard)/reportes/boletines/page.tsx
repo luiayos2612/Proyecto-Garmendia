@@ -1,362 +1,473 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
-import { 
-  Search, 
-  FileDown, 
-  GraduationCap, 
-  Filter, 
-  ChevronLeft, 
-  ChevronRight,
-  BookOpen,
-  AlertCircle,
-  CheckCircle2,
-  XCircle,
-  Loader2,
-  History
-} from 'lucide-react';
+import {
+  useEffect,
+  useState,
+} from 'react';
 import Link from 'next/link';
+import {
+  Search,
+  FileDown,
+  GraduationCap,
+  BookOpen,
+  History,
+  Loader2,
+  AlertCircle,
+} from 'lucide-react';
 
-interface NotaResumen {
-  materia_id: string;
-  materia: string;
-  codigo: string;
-  nota: number;
-  tiene_nota: boolean;
-  es_complementaria: boolean;
-  origen: 'actual' | 'historico' | 'pendiente';
-  periodo_id?: number;
+interface Intento {
+  id: string;
+  periodo_id: number;
+  numero_intento: number;
+  ano_escolar: string;
+  estado: string;
 }
 
-interface EstudianteBoletin {
+interface Estudiante {
   id: string;
   cedula: string;
-  apellidos: string;
   nombres: string;
-  periodo_id: number;
-  periodo_nombre: string;
-  notas: NotaResumen[];
+  apellidos: string;
+  intentos: Intento[];
 }
 
-interface Pagination {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-  hasNext: boolean;
-  hasPrev: boolean;
-}
+type TipoDocumento = 'boletin' | 'certificadas';
 
 export default function BoletinesPage() {
-  const [estudiantes, setEstudiantes] = useState<EstudianteBoletin[]>([]);
-  const [periodos, setPeriodos] = useState<{id: number; nombre: string}[]>([]);
-  const [periodoSeleccionado, setPeriodoSeleccionado] = useState<string>('1');
-  const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [exportando, setExportando] = useState<string | null>(null);
-  const [pagination, setPagination] = useState<Pagination>({
-    page: 1, limit: 20, total: 0, totalPages: 1, hasNext: false, hasPrev: false
-  });
+  const [periodo, setPeriodo] = useState('1');
+  const [busqueda, setBusqueda] = useState('');
+  const [busquedaAplicada, setBusquedaAplicada] =
+    useState('');
 
-  // Debounce del buscador (300ms)
+  const [estudiantes, setEstudiantes] = useState<
+    Estudiante[]
+  >([]);
+
+  const [selecciones, setSelecciones] = useState<
+    Record<string, string>
+  >({});
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const [exportando, setExportando] = useState<
+    string | null
+  >(null);
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(search);
-      setPagination(prev => ({ ...prev, page: 1 })); // reset a página 1 al buscar
+    const temporizador = setTimeout(() => {
+      setBusquedaAplicada(busqueda.trim());
     }, 300);
-    return () => clearTimeout(timer);
-  }, [search]);
 
-  // Cargar periodos
+    return () => clearTimeout(temporizador);
+  }, [busqueda]);
+
   useEffect(() => {
-    fetch('/api/periodos')
-      .then(r => r.json())
-      .then(data => {
-        if (data.periodos) setPeriodos(data.periodos);
-      })
-      .catch(console.error);
-  }, []);
+    const controlador = new AbortController();
 
-  // Cargar estudiantes
-  const cargarEstudiantes = useCallback(async (page = 1) => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        periodo_id: periodoSeleccionado,
-        search: debouncedSearch,
-        page: String(page),
-        limit: '20',
-        ano_escolar: '2025-2026' // Ajustar dinámicamente si agregas selector de año
-      });
-      
-      const res = await fetch(`/api/boletines?${params}`);
-      const data = await res.json();
-      
-      if (data.estudiantes) {
-        setEstudiantes(data.estudiantes);
-        setPagination(data.pagination);
+    async function cargar() {
+      setLoading(true);
+      setError('');
+
+      try {
+        const parametros = new URLSearchParams({
+          periodo_id: periodo,
+          search: busquedaAplicada,
+        });
+
+        const respuesta = await fetch(
+          `/api/boletines/documentos?${parametros}`,
+          {
+            cache: 'no-store',
+            signal: controlador.signal,
+          }
+        );
+
+        const datos = await respuesta.json();
+
+        if (!respuesta.ok) {
+          throw new Error(
+            datos.error ||
+              'No se pudieron cargar los estudiantes.'
+          );
+        }
+
+        const listado: Estudiante[] =
+          datos.estudiantes || [];
+
+        const iniciales: Record<string, string> = {};
+
+        for (const estudiante of listado) {
+          iniciales[estudiante.id] =
+            estudiante.intentos?.[0]?.id || '';
+        }
+
+        setEstudiantes(listado);
+        setSelecciones(iniciales);
+      } catch (errorCarga) {
+        if (controlador.signal.aborted) return;
+
+        setEstudiantes([]);
+
+        setError(
+          errorCarga instanceof Error
+            ? errorCarga.message
+            : 'Error al cargar estudiantes.'
+        );
+      } finally {
+        if (!controlador.signal.aborted) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error('Error cargando boletines:', error);
-    } finally {
-      setLoading(false);
     }
-  }, [periodoSeleccionado, debouncedSearch]);
 
-  useEffect(() => {
-    cargarEstudiantes(pagination.page);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cargarEstudiantes]);
+    cargar();
 
-  const handlePageChange = (newPage: number) => {
-    if (newPage < 1 || newPage > pagination.totalPages) return;
-    cargarEstudiantes(newPage);
-  };
+    return () => controlador.abort();
+  }, [periodo, busquedaAplicada]);
 
-  // Exportar boletín a Excel
-  const exportarBoletin = async (estudiante: EstudianteBoletin) => {
-    setExportando(estudiante.id);
+  async function exportar(
+    estudiante: Estudiante,
+    tipo: TipoDocumento
+  ) {
+    if (exportando) return;
+
+    const intentoId = selecciones[estudiante.id];
+
+    if (tipo === 'boletin' && !intentoId) {
+      setError(
+        'Seleccione el intento académico que desea imprimir.'
+      );
+      return;
+    }
+
+    const clave = `${estudiante.id}:${tipo}`;
+
+    setExportando(clave);
+    setError('');
+
     try {
-      const res = await fetch('/api/boletines/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          estudiante_id: estudiante.id,
-          periodo_id: parseInt(periodoSeleccionado),
-          ano_escolar: '2025-2026'
-        })
-      });
+      const respuesta = await fetch(
+        '/api/boletines/documentos',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            estudiante_id: estudiante.id,
+            tipo,
+            ...(tipo === 'boletin'
+              ? { intento_id: intentoId }
+              : {}),
+          }),
+        }
+      );
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Error generando boletín');
+      if (!respuesta.ok) {
+        let mensaje =
+          `No se pudo generar el archivo (${respuesta.status}).`;
+
+        try {
+          const datos = await respuesta.json();
+          mensaje = datos.error || mensaje;
+        } catch {
+          // Conserva el mensaje HTTP si la respuesta no es JSON.
+        }
+
+        throw new Error(mensaje);
       }
 
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `Boletin_${estudiante.apellidos}_${estudiante.nombres}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (error: any) {
-      alert('Error al generar el boletín: ' + error.message);
-      console.error(error);
+      const contenido = await respuesta.blob();
+      const url = URL.createObjectURL(contenido);
+
+      const nombreSeguro = [
+        tipo === 'boletin'
+          ? 'Boletin'
+          : 'Notas_Certificadas',
+        estudiante.apellidos,
+        estudiante.nombres,
+      ]
+        .join('_')
+        .replace(/[\\/:*?"<>|]/g, '_');
+
+      const enlace = document.createElement('a');
+      enlace.href = url;
+      enlace.download = `${nombreSeguro}.xlsx`;
+
+      document.body.appendChild(enlace);
+      enlace.click();
+      enlace.remove();
+
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+      }, 1000);
+    } catch (errorExportacion) {
+      setError(
+        errorExportacion instanceof Error
+          ? errorExportacion.message
+          : 'No se pudo generar el documento.'
+      );
     } finally {
       setExportando(null);
     }
-  };
-
-  const getNotaColor = (nota: number, tiene: boolean) => {
-    if (!tiene) return 'text-slate-300 bg-slate-50';
-    if (nota >= 16) return 'text-emerald-600 bg-emerald-50';
-    if (nota >= 12) return 'text-blue-600 bg-blue-50';
-    if (nota >= 10) return 'text-amber-600 bg-amber-50';
-    return 'text-rose-600 bg-rose-50';
-  };
+  }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
             <BookOpen className="w-7 h-7 text-blue-600" />
             Boletines de Calificaciones
           </h1>
+
           <p className="text-slate-500 text-sm mt-1">
-            Consulta histórica y generación de certificaciones oficiales
+            Boletín del intento seleccionado y notas
+            certificadas de los períodos registrados.
           </p>
         </div>
-        
-        <div className="flex gap-2">
-          <Link 
-            href="/reportes/boletines/historico"
-            className="inline-flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-sm font-medium transition-colors"
-          >
-            <History size={16} />
-            Cargar Notas Antiguas
-          </Link>
-        </div>
+
+        <Link
+          href="/reportes/boletines/historico"
+          className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-sm font-medium transition-colors"
+        >
+          <History size={16} />
+          Cargar Notas Antiguas
+        </Link>
       </div>
 
-      {/* Filtros */}
+      {error && (
+        <div
+          role="alert"
+          className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm"
+        >
+          {error}
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm flex flex-col sm:flex-row gap-4">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <Search
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+            size={18}
+          />
+
           <input
             type="text"
             placeholder="Buscar por nombre, apellido o cédula..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={busqueda}
+            onChange={(evento) =>
+              setBusqueda(evento.target.value)
+            }
             className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
           />
-          {search && (
-            <button 
-              onClick={() => setSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-            >
-              <XCircle size={16} />
-            </button>
-          )}
         </div>
 
-        <div className="relative sm:w-64">
-          <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-          <select
-            value={periodoSeleccionado}
-            onChange={(e) => setPeriodoSeleccionado(e.target.value)}
-            className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none appearance-none cursor-pointer"
-          >
-            {periodos.map(p => (
-              <option key={p.id} value={p.id}>{p.nombre}</option>
-            ))}
-          </select>
+        <select
+          value={periodo}
+          disabled={exportando !== null}
+          onChange={(evento) =>
+            setPeriodo(evento.target.value)
+          }
+          aria-label="Período académico"
+          className="sm:w-56 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none"
+        >
+          {[1, 2, 3, 4, 5, 6].map((numero) => (
+            <option key={numero} value={numero}>
+              Período {numero}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="bg-blue-50 border border-blue-100 text-blue-800 rounded-xl p-4 text-sm space-y-1">
+        <p>
+          El período filtra estudiantes que tienen
+          intentos registrados en ese nivel, aunque
+          actualmente estén cursando otro.
+        </p>
+        <p>
+          «Generar boletín» utiliza el intento escogido.
+          «Notas certificadas» consulta todos los
+          períodos del estudiante, sin limitarse a ese
+          intento o año escolar.
+        </p>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center h-64">
+          <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
         </div>
-      </div>
+      ) : estudiantes.length === 0 ? (
+        <div className="bg-white rounded-2xl p-12 border border-gray-100 text-center">
+          <AlertCircle className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+          <p className="text-slate-500 font-medium">
+            No se encontraron estudiantes con intentos
+            en este período.
+          </p>
+        </div>
+      ) : (
+        <>
+          <p className="text-sm text-slate-500">
+            Mostrando {estudiantes.length} estudiante(s).
+            {estudiantes.length === 100
+              ? ' Se alcanzó el límite de 100 resultados; use el buscador para localizar al estudiante.'
+              : ''}
+          </p>
 
-      {/* Stats */}
-      <div className="flex items-center gap-2 text-sm text-slate-500">
-        <CheckCircle2 size={16} className="text-blue-500" />
-        Mostrando {estudiantes.length} de {pagination.total} estudiantes
-        {debouncedSearch && ` (filtrado por "${debouncedSearch}")`}
-      </div>
+          <div className="space-y-4">
+            {estudiantes.map((estudiante) => {
+              const intento = estudiante.intentos.find(
+                (item) =>
+                  item.id === selecciones[estudiante.id]
+              );
 
-      {/* Lista */}
-      <div className="space-y-4">
-        {loading ? (
-          <div className="flex items-center justify-center h-64">
-            <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
-          </div>
-        ) : estudiantes.length === 0 ? (
-          <div className="bg-white rounded-2xl p-12 border border-gray-100 text-center">
-            <AlertCircle className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-            <p className="text-slate-500 font-medium">No se encontraron estudiantes</p>
-            <p className="text-slate-400 text-sm mt-1">
-              {debouncedSearch ? 'Intenta con otra búsqueda' : 'No hay estudiantes activos en este periodo'}
-            </p>
-          </div>
-        ) : (
-          estudiantes.map((est) => (
-            <div key={est.id} className="bg-white rounded-2xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-all">
-              
-              {/* Cabecera del estudiante */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-4 border-b border-slate-100">
-                <div className="flex items-start gap-3">
-                  <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
-                    <GraduationCap className="w-5 h-5 text-blue-600" />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-slate-900">{est.apellidos} {est.nombres}</h3>
-                    <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
-                      <span className="bg-slate-100 px-2 py-0.5 rounded-md font-mono">CI: {est.cedula}</span>
-                      <span className="bg-blue-50 text-blue-600 px-2 py-0.5 rounded-md font-medium">{est.periodo_nombre}</span>
-                    </div>
-                  </div>
-                </div>
+              const generandoBoletin =
+                exportando ===
+                `${estudiante.id}:boletin`;
 
-                <button
-                  onClick={() => exportarBoletin(est)}
-                  disabled={exportando === est.id}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white rounded-xl text-sm font-medium transition-colors"
+              const generandoCertificadas =
+                exportando ===
+                `${estudiante.id}:certificadas`;
+
+              return (
+                <div
+                  key={estudiante.id}
+                  className="bg-white rounded-2xl p-5 border border-gray-100 shadow-sm"
                 >
-                  {exportando === est.id ? (
-                    <><Loader2 size={16} className="animate-spin" /> Generando...</>
-                  ) : (
-                    <><FileDown size={16} /> Generar Boletín</>
-                  )}
-                </button>
-              </div>
+                  <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
+                        <GraduationCap className="w-5 h-5 text-blue-600" />
+                      </div>
 
-              {/* Resumen de 5 notas principales */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-                {est.notas.slice(0, 5).map((nota, idx) => (
-                  <div key={idx} className={`p-3 rounded-xl border ${nota.tiene_nota ? 'border-slate-200' : 'border-slate-100 bg-slate-50/50'}`}>
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1 truncate" title={nota.materia}>
-                      {nota.materia.length > 24 ? nota.materia.substring(0, 24) + '...' : nota.materia}
-                    </p>
-                    <div className="flex items-baseline gap-1">
-                      <span className={`text-xl font-bold px-2 py-0.5 rounded-lg ${getNotaColor(nota.nota, nota.tiene_nota)}`}>
-                        {nota.tiene_nota ? nota.nota.toFixed(1) : '--'}
-                      </span>
-                      <span className="text-xs text-slate-400">/20</span>
+                      <div>
+                        <h2 className="font-bold text-slate-900">
+                          {estudiante.apellidos}{' '}
+                          {estudiante.nombres}
+                        </h2>
+
+                        <p className="text-xs text-slate-500 mt-1">
+                          CI: {estudiante.cedula}
+                        </p>
+
+                        {intento && (
+                          <p className="text-xs text-blue-700 mt-1">
+                            Período {intento.periodo_id}
+                            {' · '}
+                            {intento.ano_escolar}
+                            {' · '}
+                            {intento.estado}
+                          </p>
+                        )}
+                      </div>
                     </div>
-                    {nota.origen === 'historico' && (
-                      <span className="text-[10px] text-amber-600 font-medium mt-1 block flex items-center gap-0.5">
-                        <History size={10} /> Histórico
-                      </span>
-                    )}
-                  </div>
-                ))}
-                
-                {est.notas.length < 5 && Array.from({ length: 5 - est.notas.length }).map((_, i) => (
-                  <div key={`empty-${i}`} className="p-3 rounded-xl border border-dashed border-slate-200 bg-slate-50/30">
-                    <p className="text-[10px] text-slate-400 uppercase">Sin materia</p>
-                    <span className="text-xl font-bold text-slate-200">--</span>
-                  </div>
-                ))}
-              </div>
 
-              {/* Materias complementarias y resumen histórico */}
-              {est.notas.some(n => n.es_complementaria && n.tiene_nota) && (
-                <div className="mt-3 pt-3 border-t border-slate-100">
-                  <p className="text-xs font-semibold text-violet-600 mb-2 flex items-center gap-1">
-                    <BookOpen size={12} /> Materias Complementarias
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {est.notas.filter(n => n.es_complementaria && n.tiene_nota).map((nota, idx) => (
-                      <span key={idx} className="inline-flex items-center gap-1 px-3 py-1 bg-violet-50 text-violet-700 rounded-lg text-xs font-medium">
-                        {nota.materia}: <strong>{nota.nota.toFixed(1)}</strong>
-                      </span>
-                    ))}
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <button
+                        type="button"
+                        disabled={
+                          exportando !== null ||
+                          !intento
+                        }
+                        onClick={() =>
+                          exportar(
+                            estudiante,
+                            'boletin'
+                          )
+                        }
+                        className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-sm font-medium transition-colors"
+                      >
+                        {generandoBoletin ? (
+                          <Loader2
+                            size={16}
+                            className="animate-spin"
+                          />
+                        ) : (
+                          <FileDown size={16} />
+                        )}
+
+                        {generandoBoletin
+                          ? 'Generando...'
+                          : 'Generar boletín'}
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={exportando !== null}
+                        onClick={() =>
+                          exportar(
+                            estudiante,
+                            'certificadas'
+                          )
+                        }
+                        className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white rounded-xl text-sm font-medium transition-colors"
+                      >
+                        {generandoCertificadas ? (
+                          <Loader2
+                            size={16}
+                            className="animate-spin"
+                          />
+                        ) : (
+                          <FileDown size={16} />
+                        )}
+
+                        {generandoCertificadas
+                          ? 'Generando...'
+                          : 'Notas certificadas'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <label
+                      htmlFor={`intento-${estudiante.id}`}
+                      className="block text-xs font-semibold text-slate-500 mb-2"
+                    >
+                      Intento que se imprimirá en el
+                      boletín
+                    </label>
+
+                    <select
+                      id={`intento-${estudiante.id}`}
+                      value={
+                        selecciones[estudiante.id] || ''
+                      }
+                      disabled={exportando !== null}
+                      onChange={(evento) => {
+                        const valor = evento.target.value;
+
+                        setSelecciones((anteriores) => ({
+                          ...anteriores,
+                          [estudiante.id]: valor,
+                        }));
+                      }}
+                      className="w-full sm:max-w-lg px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm"
+                    >
+                      {estudiante.intentos.map(
+                        (item) => (
+                          <option
+                            key={item.id}
+                            value={item.id}
+                          >
+                            Período {item.periodo_id}
+                            {' — '}
+                            Intento {item.numero_intento}
+                            {' — '}
+                            {item.ano_escolar}
+                            {' — '}
+                            {item.estado}
+                          </option>
+                        )
+                      )}
+                    </select>
                   </div>
                 </div>
-              )}
-
-              {/* Notas históricas de períodos anteriores */}
-              {est.notas.some(n => n.origen === 'historico' && n.tiene_nota) && (
-                <div className="mt-3 pt-3 border-t border-slate-100">
-                  <p className="text-xs font-semibold text-amber-600 mb-2 flex items-center gap-1">
-                    <History size={12} /> Calificaciones de Períodos Anteriores
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {est.notas.filter(n => n.origen === 'historico' && n.tiene_nota).map((nota, idx) => (
-                      <span key={idx} className="inline-flex items-center gap-1 px-3 py-1 bg-amber-50 text-amber-700 rounded-lg text-xs font-medium">
-                        {nota.materia}: <strong>{nota.nota.toFixed(1)}</strong>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Paginación */}
-      {pagination.totalPages > 1 && (
-        <div className="flex items-center justify-between bg-white rounded-2xl p-3 border border-gray-100">
-          <button
-            onClick={() => handlePageChange(pagination.page - 1)}
-            disabled={!pagination.hasPrev}
-            className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            <ChevronLeft size={16} /> Anterior
-          </button>
-          <span className="text-sm text-slate-500 font-medium">
-            Página {pagination.page} de {pagination.totalPages}
-          </span>
-          <button
-            onClick={() => handlePageChange(pagination.page + 1)}
-            disabled={!pagination.hasNext}
-            className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            Siguiente <ChevronRight size={16} />
-          </button>
-        </div>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );

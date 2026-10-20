@@ -29,9 +29,12 @@ const RUTAS_SOLO_ADMIN = [
   '/api/cupos',           // ✅ NUEVO
 ];
 
-const RUTAS_SOLO_DIRECTOR = [
-  '/reportes/boletines',
+const RUTAS_DIRECTOR_SECRETARIA = [
+  '/estudiantes/nuevo',
+  '/reportes',
   '/api/boletines',
+  '/api/auditoria',
+  '/api/estadisticas',
 ];
 
 function coincideRuta(pathname: string, lista: string[]) {
@@ -116,15 +119,29 @@ export async function middleware(request: NextRequest) {
   }
 
   // Bloqueo exclusivo de director (Boletines) — regla más estricta primero
-  if (payload.rol !== 'director' && coincideRuta(pathname, RUTAS_SOLO_DIRECTOR)) {
-    if (pathname.startsWith('/api/')) {
-      return NextResponse.json(
-        { error: 'Solo el administrador puede acceder a este recurso' },
-        { status: 403 }
-      );
-    }
-    return NextResponse.redirect(new URL('/dashboard', request.url));
+  if (
+    coincideRuta(
+      pathname,
+      RUTAS_DIRECTOR_SECRETARIA
+    ) &&
+    !['director', 'secretaria'].includes(
+      String(payload.rol)
+    )
+  ) {
+  if (pathname.startsWith('/api/')) {
+    return NextResponse.json(
+      {
+        error:
+          'Solo director y secretaría pueden acceder a este recurso.',
+      },
+      { status: 403 }
+    );
   }
+
+  return NextResponse.redirect(
+    new URL('/dashboard', request.url)
+  );
+}
 
   // Bloqueo de docente en rutas administrativas generales
   if (payload.rol === 'docente' && coincideRuta(pathname, RUTAS_SOLO_ADMIN)) {

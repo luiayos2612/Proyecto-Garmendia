@@ -257,10 +257,10 @@ export default function CalendarioDashboard({
   }
 
   return (
-    <section className="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-6 text-white shadow-sm sm:p-8">
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+    <section className="w-full max-w-[340px] rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-4 text-white shadow-sm">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="flex items-center gap-2 text-xl font-bold">
+          <h2 className="flex items-center gap-2 text-lg font-bold">
             <CalendarDays size={22} />
             Calendario de actividades
           </h2>
@@ -281,36 +281,38 @@ export default function CalendarioDashboard({
         )}
       </div>
 
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="font-semibold capitalize">{tituloMes}</h3>
+      <div className="w-full">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="font-semibold capitalize">{tituloMes}</h3>
 
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => cambiarMes(-1)}
-            aria-label="Mes anterior"
-            className="rounded-lg bg-white/10 p-2 hover:bg-white/20"
-          >
-            <ChevronLeft size={18} />
-          </button>
-          <button
-            type="button"
-            onClick={() => cambiarMes(1)}
-            aria-label="Mes siguiente"
-            className="rounded-lg bg-white/10 p-2 hover:bg-white/20"
-          >
-            <ChevronRight size={18} />
-          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => cambiarMes(-1)}
+              aria-label="Mes anterior"
+              className="rounded-lg bg-white/10 p-2 hover:bg-white/20"
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <button
+              type="button"
+              onClick={() => cambiarMes(1)}
+              aria-label="Mes siguiente"
+              className="rounded-lg bg-white/10 p-2 hover:bg-white/20"
+            >
+              <ChevronRight size={18} />
+            </button>
+          </div>
         </div>
-      </div>
 
-      <div className="grid grid-cols-7 gap-1 text-center text-xs text-slate-400">
-        {['L', 'M', 'X', 'J', 'V', 'S', 'D'].map((nombre) => (
-          <span key={nombre} className="py-2">
-            {nombre}
-          </span>
-        ))}
-      </div>
+        <div className="grid grid-cols-7 gap-1 text-center text-xs text-slate-400">
+          {['L', 'M', 'X', 'J', 'V', 'S', 'D'].map((nombre) => (
+            <span key={nombre} className="py-2">
+              {nombre}
+            </span>
+          ))}
+        </div>
+      
 
       <div className="grid grid-cols-7 gap-1">
         {diasDelMes.map((dia, indice) => {
@@ -329,7 +331,7 @@ export default function CalendarioDashboard({
               type="button"
               onClick={() => setDiaSeleccionado(fecha)}
               aria-label={`${fecha}: ${cantidad} evento(s)`}
-              className={`min-h-12 rounded-lg border p-1 text-sm transition ${
+              className={`h-10 rounded-lg border p-1 text-sm transition ${
                 diaSeleccionado === fecha
                   ? 'border-blue-400 bg-blue-600'
                   : fecha === hoy
@@ -345,8 +347,9 @@ export default function CalendarioDashboard({
           );
         })}
       </div>
+      </div>
 
-      <div className="mt-6 border-t border-white/10 pt-5">
+      <div className="mt-4 border-t border-white/10 pt-3">
         <h3 className="mb-3 text-sm font-semibold">
           Actividades del {diaSeleccionado}
         </h3>
@@ -361,7 +364,7 @@ export default function CalendarioDashboard({
           </p>
         )}
 
-        <div className="space-y-2">
+        <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
           {eventosDelDia.map((evento) => (
             <div
               key={evento.id}
