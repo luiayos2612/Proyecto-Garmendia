@@ -242,13 +242,16 @@ export async function PATCH(
   }
 }
 
-// DELETE - Eliminar definitivamente al estudiante y sus datos relacionados
+
+// DELETE - Eliminar definitivamente al estudiante
+// y sus dependencias académicas y financieras.
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const token = request.cookies.get('token')?.value ?? '';
-  const actor = verifyToken(token);
+  const actor = verifyToken(
+    request.cookies.get('token')?.value ?? ''
+  );
 
   if (!actor) {
     return NextResponse.json(
@@ -257,15 +260,22 @@ export async function DELETE(
     );
   }
 
-  // Lista explícita de roles administrativos autorizados.
-  if (!['director', 'secretaria'].includes(actor.rol)) {
+  if (
+    !['director', 'secretaria'].includes(actor.rol)
+  ) {
     return NextResponse.json(
-      { error: 'No tiene permisos para eliminar estudiantes.' },
+      {
+        error:
+          'No tiene permisos para eliminar estudiantes.',
+      },
       { status: 403 }
     );
   }
 
-  if (process.env.ALLOW_PERMANENT_STUDENT_DELETE !== 'true') {
+  if (
+    process.env.ALLOW_PERMANENT_STUDENT_DELETE !==
+    'true'
+  ) {
     return NextResponse.json(
       {
         error:
@@ -277,14 +287,16 @@ export async function DELETE(
 
   const { id } = await params;
 
-  const esUuid =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
       id
-    );
-
-  if (!esUuid) {
+    )
+  ) {
     return NextResponse.json(
-      { error: 'El identificador del estudiante no es válido.' },
+      {
+        error:
+          'El identificador del estudiante no es válido.',
+      },
       { status: 400 }
     );
   }
@@ -298,86 +310,284 @@ export async function DELETE(
     await client.query('BEGIN');
     transaccionAbierta = true;
 
+    await client.query(
+      "SET LOCAL lock_timeout = '5s'"
+    );
+
+    // Comprobar el estado y rol actual de la cuenta.
+    const usuarioResult = await client.query(
+      `
+        SELECT id, rol
+        FROM usuarios
+        WHERE id = $1::uuid
+          AND activo = true
+        FOR SHARE
+      `,
+      [actor.userId]
+    );
+
+    const usuario = usuarioResult.rows[0];
+
+    if (
+      !usuario ||
+      !['director', 'secretaria'].includes(
+        usuario.rol
+      )
+    ) {
+      await client.query('ROLLBACK');
+      transaccionAbierta = false;
+
+      return NextResponse.json(
+        {
+          error:
+            'La cuenta no está activa o ya no tiene permisos para eliminar estudiantes.',
+        },
+        { status: 403 }
+      );
+    }
+
     const estudianteResult = await client.query(
       `
         SELECT id
         FROM estudiantes
-        WHERE id = $1
+        WHERE id = $1::uuid
         FOR UPDATE
       `,
       [id]
     );
 
-    if (estudianteResult.rows.length === 0) {
+    if (estudianteResult.rows.length !== 1) {
       await client.query('ROLLBACK');
       transaccionAbierta = false;
 
       return NextResponse.json(
-        { error: 'Estudiante no encontrado.' },
+        {
+          error: 'Estudiante no encontrado.',
+        },
         { status: 404 }
       );
     }
 
-    const identificadoresEliminados = new Set<string>([id]);
     const eliminados: Record<string, number> = {};
 
-    // Lista fija: los nombres de tabla no provienen del navegador.
-    // Las cuotas se eliminan antes que los pagos porque pueden referenciarlos.
-    const tablasRelacionadas = [
-      'calificaciones',
-      'historial_academico',
-      'inscripciones_materias',
-      'cupos',
-      'cuotas',
-      'pagos',
-    ] as const;
-
-    for (const tabla of tablasRelacionadas) {
-      const resultado = await client.query<{ id: string }>(
-        `
-          DELETE FROM ${tabla}
-          WHERE estudiante_id = $1
-          RETURNING id
-        `,
-        [id]
-      );
-
-      eliminados[tabla] = resultado.rowCount ?? 0;
-
-      for (const fila of resultado.rows) {
-        identificadoresEliminados.add(String(fila.id));
-      }
-    }
-
-    const estudianteEliminado = await client.query(
+    /*
+     * Bloquear los intentos y las inscripciones del
+     * estudiante antes de retirar sus dependencias.
+     */
+    await client.query(
       `
-        DELETE FROM estudiantes
-        WHERE id = $1
-        RETURNING id
+        SELECT id
+        FROM intentos_academicos
+        WHERE estudiante_id = $1::uuid
+        ORDER BY id
+        FOR UPDATE
       `,
       [id]
     );
 
-    eliminados.estudiantes = estudianteEliminado.rowCount ?? 0;
-
-    // Contempla JSON anidados, como { estudiante: { id: ... } },
-    // y auditorías de los pagos u otros registros eliminados.
-    const auditoriaResult = await client.query(
+    await client.query(
       `
-        DELETE FROM auditoria AS a
-        WHERE EXISTS (
-          SELECT 1
-          FROM unnest($1::text[]) AS objetivo(identificador)
-          WHERE strpos(
-            COALESCE(a.datos_nuevos::text, ''),
-            objetivo.identificador
-          ) > 0
-        )
+        SELECT id
+        FROM inscripciones_materias
+        WHERE estudiante_id = $1::uuid
+        ORDER BY id
+        FOR UPDATE
       `,
-      [Array.from(identificadoresEliminados)]
+      [id]
     );
 
-    eliminados.auditoria = auditoriaResult.rowCount ?? 0;
+    /*
+     * 1. Evaluaciones.
+     * Pueden referenciar una inscripción o una
+     * calificación migrada.
+     */
+    const evaluacionesResult = await client.query(
+      `
+        DELETE FROM evaluaciones_academicas ea
+        WHERE ea.inscripcion_id IN (
+          SELECT im.id
+          FROM inscripciones_materias im
+          WHERE im.estudiante_id = $1::uuid
+        )
+        OR ea.calificacion_legacy_id IN (
+          SELECT c.id
+          FROM calificaciones c
+          WHERE c.estudiante_id = $1::uuid
+        )
+      `,
+      [id]
+    );
+
+    eliminados.evaluaciones_academicas =
+      evaluacionesResult.rowCount ?? 0;
+
+    // 2. Calificaciones vinculadas al estudiante.
+    const calificacionesResult = await client.query(
+      `
+        DELETE FROM calificaciones
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.calificaciones =
+      calificacionesResult.rowCount ?? 0;
+
+    // 3. Historial académico.
+    const historialResult = await client.query(
+      `
+        DELETE FROM historial_academico
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.historial_academico =
+      historialResult.rowCount ?? 0;
+
+    // 4. Cupos: referencian intentos de origen y destino.
+    const cuposResult = await client.query(
+      `
+        DELETE FROM cupos
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.cupos =
+      cuposResult.rowCount ?? 0;
+
+    /*
+     * 5. Romper el ciclo entre inscripciones y tutorías.
+     * Solo se actualizan inscripciones del estudiante
+     * que se está eliminando.
+     */
+    await client.query(
+      `
+        UPDATE inscripciones_materias
+        SET tutoria_id = NULL
+        WHERE estudiante_id = $1::uuid
+          AND tutoria_id IS NOT NULL
+      `,
+      [id]
+    );
+
+    const tutoriasResult = await client.query(
+      `
+        DELETE FROM tutorias_academicas
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.tutorias_academicas =
+      tutoriasResult.rowCount ?? 0;
+
+    // 6. Inscripciones, ya sin sus dependencias.
+    const inscripcionesResult = await client.query(
+      `
+        DELETE FROM inscripciones_materias
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.inscripciones_materias =
+      inscripcionesResult.rowCount ?? 0;
+
+    /*
+     * 7. Vínculos de comprobantes con cuotas.
+     * Deben borrarse antes de cuotas y pagos.
+     */
+    const vinculosResult = await client.query(
+      `
+        DELETE FROM pagos_cuotas
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.pagos_cuotas =
+      vinculosResult.rowCount ?? 0;
+
+    // 8. Cuotas antes de pagos.
+    const cuotasResult = await client.query(
+      `
+        DELETE FROM cuotas
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.cuotas =
+      cuotasResult.rowCount ?? 0;
+
+    const pagosResult = await client.query(
+      `
+        DELETE FROM pagos
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.pagos =
+      pagosResult.rowCount ?? 0;
+
+    // 9. Intentos, sin dependencias académicas ni financieras.
+    const intentosResult = await client.query(
+      `
+        DELETE FROM intentos_academicos
+        WHERE estudiante_id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.intentos_academicos =
+      intentosResult.rowCount ?? 0;
+
+    // 10. Estudiante.
+    const estudianteEliminado = await client.query(
+      `
+        DELETE FROM estudiantes
+        WHERE id = $1::uuid
+      `,
+      [id]
+    );
+
+    eliminados.estudiantes =
+      estudianteEliminado.rowCount ?? 0;
+
+    /*
+     * Se conserva la trazabilidad.
+     * No se borran auditorías por coincidencias dentro
+     * de un JSON, porque podrían contener operaciones
+     * agrupadas con otros registros.
+     */
+    await client.query(
+      `
+        INSERT INTO auditoria (
+          tabla_afectada,
+          accion,
+          usuario_id,
+          datos_nuevos
+        )
+        VALUES (
+          'estudiantes',
+          'DELETE',
+          $1,
+          $2
+        )
+      `,
+      [
+        actor.userId,
+        JSON.stringify({
+          estudiante_id: id,
+          eliminados,
+          resumen:
+            'Eliminación definitiva del estudiante y sus dependencias académicas y financieras.',
+        }),
+      ]
+    );
 
     await client.query('COMMIT');
     transaccionAbierta = false;
@@ -385,7 +595,8 @@ export async function DELETE(
     return NextResponse.json(
       {
         success: true,
-        message: 'Estudiante eliminado definitivamente.',
+        message:
+          'Estudiante eliminado definitivamente.',
         eliminados,
       },
       {
@@ -413,15 +624,37 @@ export async function DELETE(
         ? String(error.code)
         : '';
 
-    console.error('Error DELETE definitivo estudiante:', error);
+    const restriccion =
+      typeof error === 'object' &&
+      error !== null &&
+      'constraint' in error
+        ? String(error.constraint)
+        : '';
+
+    console.error(
+      'Error DELETE definitivo estudiante:',
+      error
+    );
 
     if (codigo === '23503') {
       return NextResponse.json(
         {
           error:
-            'Existe otra relación de datos que impide eliminar al estudiante. ' +
-            'Se canceló la operación completa. Revise la restricción indicada ' +
-            'en la terminal antes de agregar otra eliminación.',
+            'Existe una relación adicional que impide eliminar al estudiante. No se guardó ningún cambio.',
+          restriccion,
+        },
+        { status: 409 }
+      );
+    }
+
+    if (
+      codigo === '55P03' ||
+      codigo === '40P01'
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            'Otro proceso está utilizando los registros del estudiante. No se guardó la eliminación. Espere unos segundos antes de reintentar.',
         },
         { status: 409 }
       );
@@ -430,8 +663,7 @@ export async function DELETE(
     return NextResponse.json(
       {
         error:
-          'No se pudo completar la eliminación. ' +
-          'Revise la terminal del servidor para identificar la causa.',
+          'No se pudo completar la eliminación. Revise la terminal del servidor.',
       },
       { status: 500 }
     );
